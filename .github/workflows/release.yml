@@ -1,0 +1,120 @@
+name: Cross-Platform Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-core:
+    name: Test Rust Core & RPC (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Workspace Unit & Integration Tests
+        run: cargo test --workspace
+
+  build-matrix:
+    name: Build Release (${{ matrix.artifact_name }})
+    needs: test-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: freecompare-linux-x86_64
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: freecompare-windows-x86_64
+            archive_ext: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: freecompare-macos-arm64
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: freecompare-macos-x86_64
+            archive_ext: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build SolidJS Virtual Viewport Frontend
+        working-directory: ./ui
+        run: |
+          npm install
+          npm run build
+
+      - name: Build Release Binaries (fcompare & fc)
+        run: cargo build --release -p freecompare-cli --target ${{ matrix.target }}
+
+      - name: Package Portable Archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist-pkg/ui
+          cp target/${{ matrix.target }}/release/fcompare dist-pkg/
+          cp target/${{ matrix.target }}/release/fc dist-pkg/
+          cp -r ui/dist dist-pkg/ui/
+          cp README.md dist-pkg/
+          tar -czf ${{ matrix.artifact_name }}.tar.gz -C dist-pkg .
+
+      - name: Package Portable Archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-pkg/ui | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/fcompare.exe dist-pkg/
+          Copy-Item target/${{ matrix.target }}/release/fc.exe dist-pkg/
+          Copy-Item -Recurse ui/dist dist-pkg/ui/
+          Copy-Item README.md dist-pkg/
+          Compress-Archive -Path dist-pkg/* -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
+
+  publish-github-release:
+    name: Publish GitHub Release
+    needs: build-matrix
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.zip
