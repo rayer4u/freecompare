@@ -298,7 +298,9 @@ fn read_dir_entries(
         if glob_set.is_match(&name) || glob_set.is_match(&rel_path) {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
+        // Use `fs::metadata` on `entry.path()` rather than `entry.metadata()` so that
+        // symlinks created by `git difftool --dir-diff` are followed properly!
+        let Ok(meta) = fs::metadata(entry.path()).or_else(|_| entry.metadata()) else {
             continue;
         };
         let modified_ms = meta

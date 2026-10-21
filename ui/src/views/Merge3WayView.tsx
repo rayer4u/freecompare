@@ -1,4 +1,4 @@
-import { Component, createSignal, For, onMount, Show } from "solid-js";
+import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   callRustRpc,
   createBlankThreeWaySession,
@@ -13,6 +13,9 @@ interface Merge3WayViewProps {
   initialLeftPath?: string;
   initialBasePath?: string;
   initialRightPath?: string;
+  initialOutputPath?: string;
+  titles?: [string | null, string | null, string | null, string | null];
+  onCloseOrExit?: () => void;
 }
 
 export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
@@ -23,7 +26,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
   const [leftPath, setLeftPath] = createSignal(props.initialLeftPath ?? "");
   const [basePath, setBasePath] = createSignal(props.initialBasePath ?? "");
   const [rightPath, setRightPath] = createSignal(props.initialRightPath ?? "");
-  const [outputPath, setOutputPath] = createSignal("");
+  const [outputPath, setOutputPath] = createSignal(props.initialOutputPath ?? "");
   const [pickerTarget, setPickerTarget] = createSignal<
     "left" | "base" | "right" | null
   >(null);
@@ -60,7 +63,28 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     }
   };
 
+  const handleMergeKeyDown = (e: KeyboardEvent) => {
+    const activeEl = document.activeElement;
+    if (
+      activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement ||
+      pickerTarget()
+    ) {
+      return;
+    }
+    if (e.key === "Escape" || (e.ctrlKey && e.key.toLowerCase() === "w")) {
+      e.preventDefault();
+      props.onCloseOrExit?.();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      handleSaveMergedOutput(false);
+    }
+  };
+
   onMount(() => {
+    window.addEventListener("keydown", handleMergeKeyDown);
     if (props.initialLeftPath && props.initialBasePath && props.initialRightPath) {
       handleLoadThreeWay(
         props.initialLeftPath,
@@ -70,13 +94,17 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     }
   });
 
+  onCleanup(() => {
+    window.removeEventListener("keydown", handleMergeKeyDown);
+  });
+
   const handleResolve = (hunkId: number, resolution: ConflictResolution) => {
     const next = resolveThreeWayHunk(props.sessionId, hunkId, resolution);
     setSummary(next);
     notify(`已更新块 #${hunkId + 1} 合并策略 (${resolution})`);
   };
 
-  const handleSaveMergedOutput = async () => {
+  const handleSaveMergedOutput = async (closeAfterSave = false) => {
     const content = summary().merged_lines.join("\n") + "\n";
     const target = outputPath().trim() || basePath().trim();
     if (target) {
@@ -86,7 +114,15 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           content,
         });
         if (res?.saved) {
-          notify(`已保存合并结果到: ${target}`);
+          await callRustRpc("set_process_exit_code", { code: 0 });
+          notify(`已保存合并结果到: ${target} (Exit Code: 0)`);
+          if (closeAfterSave) {
+            await fetch("/api/shutdown", {
+              method: "POST",
+              body: "immediate",
+            }).catch(() => {});
+            setTimeout(() => window.close(), 120);
+          }
           return;
         }
       } catch (err) {
@@ -100,6 +136,15 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     } catch {
       notify("请指定输出文件路径后保存");
     }
+  };
+
+  const handleAbortMerge = async () => {
+    await callRustRpc("set_process_exit_code", { code: 1 });
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: "immediate",
+    }).catch(() => {});
+    setTimeout(() => window.close(), 120);
   };
 
   return (
@@ -163,8 +208,25 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         </div>
 
         <div class="bc-stats-pills">
-          <button class="bc-tool-btn active" onClick={handleSaveMergedOutput}>
-            💾 保存/拷贝合并输出
+          <button
+            class="bc-tool-btn"
+            onClick={() => handleSaveMergedOutput(false)}
+          >
+            💾 保存输出
+          </button>
+          <button
+            class="bc-tool-btn active"
+            onClick={() => handleSaveMergedOutput(true)}
+            title="保存合并结果并以 Exit Code 0 退出 (Git Mergetool 成功)"
+          >
+            ✅ 完成合并退出 (Exit 0)
+          </button>
+          <button
+            class="bc-tool-btn"
+            onClick={handleAbortMerge}
+            title="放弃合并并以 Exit Code 1 退出 (Git Mergetool 保留冲突)"
+          >
+            🚫 放弃合并 (Exit 1)
           </button>
         </div>
       </div>
@@ -220,7 +282,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
       {/* Top 3 Panes: Left (LOCAL) | Base (ANCESTOR) | Right (REMOTE) */}
       <div class="three-way-top-grid">
         <div class="three-way-col">
-          <div class="three-way-col-header left">LEFT (本地修改 / LOCAL)</div>
+          <div class="three-way-col-header left">
+            {props.titles?.[0] ?? "LEFT (本地修改 / LOCAL)"}
+          </div>
           <div class="three-way-code-list">
             <For each={rows()}>
               {(row) => (
@@ -234,7 +298,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         </div>
 
         <div class="three-way-col">
-          <div class="three-way-col-header base">BASE (共同祖先 / ANCESTOR)</div>
+          <div class="three-way-col-header base">
+            {props.titles?.[2] ?? "BASE (共同祖先 / ANCESTOR)"}
+          </div>
           <div class="three-way-code-list">
             <For each={rows()}>
               {(row) => (
@@ -248,7 +314,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         </div>
 
         <div class="three-way-col">
-          <div class="three-way-col-header right">RIGHT (远端修改 / REMOTE)</div>
+          <div class="three-way-col-header right">
+            {props.titles?.[1] ?? "RIGHT (远端修改 / REMOTE)"}
+          </div>
           <div class="three-way-code-list">
             <For each={rows()}>
               {(row) => (

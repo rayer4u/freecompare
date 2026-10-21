@@ -2,6 +2,7 @@ import { Component, createMemo, createSignal, onCleanup, onMount, Show, For } fr
 import {
   callRustRpc,
   CompareBackendClient,
+  UserPreferencesDto,
   ViewRowFilter,
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
@@ -9,6 +10,7 @@ import { VirtualDiffViewport } from "../engine/VirtualDiffViewport";
 import {
   DiffOptions,
   MergeDirection,
+  SiblingDiffFileItem,
   TwoWayDiffResult,
   ViewportRowDto,
 } from "../types";
@@ -19,6 +21,13 @@ interface TextDiffViewProps {
   initialRightPath?: string;
   initialLeftContent?: string;
   initialRightContent?: string;
+  leftTitle?: string;
+  rightTitle?: string;
+  leftReadonly?: boolean;
+  rightReadonly?: boolean;
+  siblingFiles?: SiblingDiffFileItem[];
+  onCloseOrExit?: () => void;
+  onUpdateTabTitle?: (newTitle: string) => void;
 }
 
 export const TextDiffView: Component<TextDiffViewProps> = (props) => {
@@ -37,6 +46,50 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     null
   );
   const [fullEditDraft, setFullEditDraft] = createSignal("");
+  const [showFilesSidebar, setShowFilesSidebar] = createSignal<boolean>(
+    Boolean(props.siblingFiles && props.siblingFiles.length > 1)
+  );
+  const [showLineInspector, setShowLineInspector] = createSignal<boolean>(true);
+  const [editorFontSize, setEditorFontSize] = createSignal<number>(13);
+  const [showWhitespaceGlyphs, setShowWhitespaceGlyphs] = createSignal<boolean>(false);
+  const [autoJumpFirstDiff, setAutoJumpFirstDiff] = createSignal<boolean>(true);
+  const [confirmExitDirty, setConfirmExitDirty] = createSignal<boolean>(true);
+  const [recentLeftPaths, setRecentLeftPaths] = createSignal<string[]>([]);
+  const [recentRightPaths, setRecentRightPaths] = createSignal<string[]>([]);
+
+  const tryCloseOrExit = () => {
+    if (
+      confirmExitDirty() &&
+      (summary().left_dirty || summary().right_dirty) &&
+      !window.confirm("当前文件存在未保存的修改，确定要放弃修改并退出吗？")
+    ) {
+      return;
+    }
+    props.onCloseOrExit?.();
+  };
+
+  const currentSiblingIdx = createMemo(() => {
+    const list = props.siblingFiles ?? [];
+    if (list.length === 0) return -1;
+    const lp = leftPath().trim();
+    const rp = rightPath().trim();
+    return list.findIndex(
+      (item) => item.leftFullPath === lp || item.rightFullPath === rp
+    );
+  });
+
+  const switchToSiblingFile = async (targetIdx: number) => {
+    const list = props.siblingFiles ?? [];
+    if (list.length === 0) return;
+    const wrapped = (targetIdx + list.length) % list.length;
+    const target = list[wrapped];
+    setLeftPath(target.leftFullPath);
+    setRightPath(target.rightFullPath);
+    setActiveHunkIdx(0);
+    const shortName = target.relativePath.split("/").pop() ?? target.relativePath;
+    props.onUpdateTabTitle?.(shortName);
+    await handleLoadDiskPaths(target.leftFullPath, target.rightFullPath);
+  };
 
   const [options, setOptions] = createSignal<DiffOptions>({
     ignore_whitespace: false,
@@ -96,6 +149,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleMergeHunk = (hunkId: number, direction: MergeDirection) => {
+    if (direction === "left_to_right" && props.rightReadonly) {
+      showToast("🔒 右侧处于只读锁定模式 (-ro2)，禁止覆盖修改");
+      return;
+    }
+    if (direction === "right_to_left" && props.leftReadonly) {
+      showToast("🔒 左侧处于只读锁定模式 (-ro1)，禁止覆盖修改");
+      return;
+    }
     const nextSummary = CompareBackendClient.mergeHunk(props.sessionId, hunkId, direction);
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
@@ -107,6 +168,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleEditLine = (isLeft: boolean, lineNo1Based: number, newText: string) => {
+    if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
+      showToast("🔒 当前侧处于只读锁定模式 (-ro)，无法编辑");
+      return;
+    }
     const nextSummary = CompareBackendClient.editLine(
       props.sessionId,
       isLeft,
@@ -119,6 +184,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handlePasteTextToSide = (isLeft: boolean, text: string) => {
+    if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
+      showToast("🔒 当前侧处于只读锁定模式 (-ro)，无法粘贴覆盖");
+      return;
+    }
     setAllSelectedSide(null);
     const nextSummary = CompareBackendClient.replaceSideText(
       props.sessionId,
@@ -183,6 +252,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     );
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
+    callRustRpc("update_user_preferences", { text_row_filter: filter }).catch(() => {});
   };
 
   const handleToggleOption = (key: keyof DiffOptions) => {
@@ -198,6 +268,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     );
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
+    callRustRpc("update_user_preferences", {
+      ignore_whitespace: next.ignore_whitespace,
+      ignore_case: next.ignore_case,
+    }).catch(() => {});
   };
 
   const handleUndo = (isLeft: boolean) => {
@@ -308,9 +382,22 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       if (loaded) {
         setSummary(loaded);
         setVersionTick((t) => t + 1);
-        const initial = CompareBackendClient.getViewportSlice(props.sessionId, 0, 50);
-        const firstDiff = initial.rows.find((row) => row.status !== "equal") ?? initial.rows[0];
-        if (firstDiff) setSelectedRow(firstDiff);
+        if (autoJumpFirstDiff() && loaded.hunks.length > 0) {
+          setActiveHunkIdx(0);
+          const firstHunk = loaded.hunks[0];
+          setScrollTriggerRow(firstHunk.virtual_start);
+          const slice = CompareBackendClient.getViewportSlice(
+            props.sessionId,
+            firstHunk.virtual_start,
+            1
+          );
+          if (slice.rows[0]) setSelectedRow(slice.rows[0]);
+        } else {
+          const initial = CompareBackendClient.getViewportSlice(props.sessionId, 0, 50);
+          const firstDiff =
+            initial.rows.find((row) => row.status !== "equal") ?? initial.rows[0];
+          if (firstDiff) setSelectedRow(firstDiff);
+        }
         showToast(`已加载对比文件: ${l} ↔ ${r}`);
       }
     } catch (err) {
@@ -323,8 +410,120 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     const isInputFocused =
       activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
 
-    if (!isInputFocused && (e.ctrlKey || e.metaKey)) {
+    // 1. `Esc` key: Beyond Compare's signature muscle-memory shortcut!
+    // If a modal or full-text selection is open, dismiss it first; otherwise exit / advance to next git difftool file!
+    if (e.key === "Escape") {
+      if (browserTargetSide()) {
+        setBrowserTargetSide(null);
+        return;
+      }
+      if (editingFullSide()) {
+        setEditingFullSide(null);
+        return;
+      }
+      if (allSelectedSide()) {
+        setAllSelectedSide(null);
+        return;
+      }
+      if (isInputFocused) {
+        (activeEl as HTMLElement).blur();
+        return;
+      }
+      e.preventDefault();
+      tryCloseOrExit();
+      return;
+    }
+
+    if (isInputFocused) return;
+
+    // 2. Ctrl / Cmd shortcuts (BC + FreeCompare enhanced)
+    if (e.ctrlKey || e.metaKey) {
       const key = e.key.toLowerCase();
+      // Font size zoom (`Ctrl + =` / `Ctrl + -` / `Ctrl + 0`)
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        const nextSize = Math.min(24, editorFontSize() + 1);
+        setEditorFontSize(nextSize);
+        callRustRpc("update_user_preferences", { editor_font_size: nextSize }).catch(
+          () => {}
+        );
+        showToast(`代码字号: ${nextSize}px`);
+        return;
+      }
+      if (e.key === "-") {
+        e.preventDefault();
+        const nextSize = Math.max(10, editorFontSize() - 1);
+        setEditorFontSize(nextSize);
+        callRustRpc("update_user_preferences", { editor_font_size: nextSize }).catch(
+          () => {}
+        );
+        showToast(`代码字号: ${nextSize}px`);
+        return;
+      }
+      if (e.key === "0") {
+        e.preventDefault();
+        setEditorFontSize(13);
+        callRustRpc("update_user_preferences", { editor_font_size: 13 }).catch(() => {});
+        showToast("代码字号已重置: 13px");
+        return;
+      }
+      // `Ctrl+Alt+M` (BC next diff file) / `Ctrl+Alt+N` (BC prev diff file)
+      if (e.altKey && key === "m") {
+        e.preventDefault();
+        if ((props.siblingFiles?.length ?? 0) > 0) {
+          switchToSiblingFile(currentSiblingIdx() + 1);
+        } else {
+          tryCloseOrExit();
+        }
+        return;
+      }
+      if (e.altKey && key === "n") {
+        e.preventDefault();
+        if ((props.siblingFiles?.length ?? 0) > 0) {
+          switchToSiblingFile(currentSiblingIdx() - 1);
+        }
+        return;
+      }
+      // `Ctrl+W`: Close current comparison / advance git difftool
+      if (key === "w") {
+        e.preventDefault();
+        tryCloseOrExit();
+        return;
+      }
+      // `Ctrl+B`: Toggle Changed Files Sidebar (VS Code style)
+      if (key === "b" && (props.siblingFiles?.length ?? 0) > 0) {
+        e.preventDefault();
+        setShowFilesSidebar((v) => !v);
+        return;
+      }
+      // `Ctrl+N` (BC Next Diff) / `Ctrl+P` (BC Prev Diff)
+      if (key === "n") {
+        e.preventDefault();
+        jumpToHunk(1);
+        return;
+      }
+      if (key === "p") {
+        e.preventDefault();
+        jumpToHunk(-1);
+        return;
+      }
+      // `Ctrl+R` (BC Copy to Right) / `Ctrl+L` (BC Copy to Left)
+      if (key === "r") {
+        const h = currentHunk();
+        if (h) {
+          e.preventDefault();
+          handleMergeHunk(h.id, "left_to_right");
+        }
+        return;
+      }
+      if (key === "l") {
+        const h = currentHunk();
+        if (h) {
+          e.preventDefault();
+          handleMergeHunk(h.id, "right_to_left");
+        }
+        return;
+      }
       if (key === "a") {
         e.preventDefault();
         const side = focusedSide();
@@ -361,31 +560,119 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         handleRedo(focusedSide() === "left");
         return;
       }
+      return;
     }
 
-    if (e.altKey && e.key === "ArrowDown") {
+    // 3. Alt shortcuts (Beyond Compare classic + PageUp/PageDown file switching)
+    if (e.altKey) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        jumpToHunk(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        jumpToHunk(-1);
+      } else if (e.key === "ArrowRight") {
+        const h = currentHunk();
+        if (h) {
+          e.preventDefault();
+          handleMergeHunk(h.id, "left_to_right");
+        }
+      } else if (e.key === "ArrowLeft") {
+        const h = currentHunk();
+        if (h) {
+          e.preventDefault();
+          handleMergeHunk(h.id, "right_to_left");
+        }
+      } else if (e.key === "PageDown" || e.key === "]") {
+        e.preventDefault();
+        if ((props.siblingFiles?.length ?? 0) > 0) {
+          switchToSiblingFile(currentSiblingIdx() + 1);
+        } else {
+          props.onCloseOrExit?.();
+        }
+      } else if (e.key === "PageUp" || e.key === "[") {
+        e.preventDefault();
+        if ((props.siblingFiles?.length ?? 0) > 0) {
+          switchToSiblingFile(currentSiblingIdx() - 1);
+        }
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        if (summary().hunks.length > 0) {
+          setActiveHunkIdx(0);
+          jumpToHunk(0);
+        }
+      } else if (e.key === "End") {
+        e.preventDefault();
+        if (summary().hunks.length > 0) {
+          setActiveHunkIdx(summary().hunks.length - 1);
+          jumpToHunk(0);
+        }
+      }
+      return;
+    }
+
+    // 4. Function keys (`F7` / `Shift+F7` BC Next/Prev diff) & single-key Vim/modern shortcuts
+    if (e.key === "F7") {
+      e.preventDefault();
+      jumpToHunk(e.shiftKey ? -1 : 1);
+    } else if (e.key === "n" || e.key === "j") {
       e.preventDefault();
       jumpToHunk(1);
-    } else if (e.altKey && e.key === "ArrowUp") {
+    } else if (e.key === "p" || e.key === "N" || e.key === "k") {
       e.preventDefault();
       jumpToHunk(-1);
-    } else if (e.altKey && e.key === "ArrowRight") {
-      const h = currentHunk();
-      if (h) {
-        e.preventDefault();
-        handleMergeHunk(h.id, "left_to_right");
+    } else if (e.key === "]") {
+      e.preventDefault();
+      if ((props.siblingFiles?.length ?? 0) > 0) {
+        switchToSiblingFile(currentSiblingIdx() + 1);
+      } else {
+        tryCloseOrExit();
       }
-    } else if (e.altKey && e.key === "ArrowLeft") {
-      const h = currentHunk();
-      if (h) {
-        e.preventDefault();
-        handleMergeHunk(h.id, "right_to_left");
+    } else if (e.key === "[") {
+      e.preventDefault();
+      if ((props.siblingFiles?.length ?? 0) > 0) {
+        switchToSiblingFile(currentSiblingIdx() - 1);
       }
+    } else if (e.key === "\\") {
+      if ((props.siblingFiles?.length ?? 0) > 0) {
+        e.preventDefault();
+        setShowFilesSidebar((v) => !v);
+      }
+    } else if (e.key === "d") {
+      e.preventDefault();
+      handleSetRowFilter(rowFilter() === "diffs" ? "all" : "diffs");
+    } else if (e.key === "q") {
+      e.preventDefault();
+      tryCloseOrExit();
     }
   };
 
   onMount(async () => {
     window.addEventListener("keydown", handleKeyDown);
+    const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
+    if (prefs) {
+      const f =
+        prefs.text_row_filter === "diffs" || prefs.text_row_filter === "equals"
+          ? prefs.text_row_filter
+          : "all";
+      setRowFilter(f);
+      setOptions({
+        ignore_whitespace: Boolean(prefs.ignore_whitespace),
+        ignore_case: Boolean(prefs.ignore_case),
+        show_only_diffs: f === "diffs",
+        context_lines: 3,
+      });
+      if ((props.siblingFiles?.length ?? 0) > 1) {
+        setShowFilesSidebar(prefs.show_files_sidebar ?? true);
+      }
+      setShowLineInspector(prefs.show_line_inspector ?? true);
+      setEditorFontSize(prefs.editor_font_size || 13);
+      setShowWhitespaceGlyphs(Boolean(prefs.show_whitespace_glyphs));
+      setAutoJumpFirstDiff(prefs.auto_jump_first_diff ?? true);
+      setConfirmExitDirty(prefs.confirm_before_exit_dirty ?? true);
+      setRecentLeftPaths(prefs.recent_left_paths ?? []);
+      setRecentRightPaths(prefs.recent_right_paths ?? []);
+    }
     if (props.initialLeftPath || props.initialRightPath) {
       await handleLoadDiskPaths(props.initialLeftPath, props.initialRightPath);
     }
@@ -439,6 +726,32 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             title="忽略大小写差异"
           >
             Aa 忽略大小写
+          </button>
+          <button
+            class={`bc-tool-btn ${showWhitespaceGlyphs() ? "active" : ""}`}
+            onClick={() => {
+              const next = !showWhitespaceGlyphs();
+              setShowWhitespaceGlyphs(next);
+              callRustRpc("update_user_preferences", {
+                show_whitespace_glyphs: next,
+              }).catch(() => {});
+            }}
+            title="显示可见空白符 (· 空格 / → Tab)"
+          >
+            ¶ 可见空白
+          </button>
+          <button
+            class={`bc-tool-btn ${showLineInspector() ? "active" : ""}`}
+            onClick={() => {
+              const next = !showLineInspector();
+              setShowLineInspector(next);
+              callRustRpc("update_user_preferences", {
+                show_line_inspector: next,
+              }).catch(() => {});
+            }}
+            title="显示/隐藏底部单行详情放大镜面板"
+          >
+            🔍 详情栏
           </button>
         </div>
 
@@ -525,12 +838,48 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           </button>
         </div>
 
-        {/* Summary Badges */}
+        {/* Summary Badges & Changed File Navigation */}
         <div class="bc-stats-pills">
+          <Show when={(props.siblingFiles?.length ?? 0) > 0}>
+            <button
+              class={`bc-tool-btn ${showFilesSidebar() ? "active" : ""}`}
+              onClick={() => {
+                const next = !showFilesSidebar();
+                setShowFilesSidebar(next);
+                callRustRpc("update_user_preferences", {
+                  show_files_sidebar: next,
+                }).catch(() => {});
+              }}
+              title="展开/收起变更文件列表 (Ctrl+B 或 \)"
+            >
+              📂 文件 ({Math.max(1, currentSiblingIdx() + 1)}/{props.siblingFiles!.length})
+            </button>
+            <button
+              class="bc-tool-btn"
+              onClick={() => switchToSiblingFile(currentSiblingIdx() - 1)}
+              title="上一个变更文件 ([ 或 Alt+PageUp 或 Ctrl+Alt+N)"
+            >
+              ⬅️ 上一文件 ([)
+            </button>
+            <button
+              class="bc-tool-btn"
+              onClick={() => switchToSiblingFile(currentSiblingIdx() + 1)}
+              title="下一个变更文件 (] 或 Alt+PageDown 或 Ctrl+Alt+M)"
+            >
+              ➡️ 下一文件 (])
+            </button>
+          </Show>
           <span class="stat-pill mod">修改块: {summary().stats.modified_hunks}</span>
           <span class="stat-pill ins">新增块: {summary().stats.inserted_hunks}</span>
           <span class="stat-pill del">删除块: {summary().stats.deleted_hunks}</span>
           <span class="stat-pill eq">相同行: {summary().stats.equal_lines}</span>
+          <button
+            class="bc-tool-btn"
+            onClick={tryCloseOrExit}
+            title="Beyond Compare 风格 Esc 退出当前对比，自动进入 Git 队列下一个文件或返回目录列表 (Esc / q / Ctrl+W)"
+          >
+            ⏭️ 下个文件/退出 (Esc)
+          </button>
         </div>
       </div>
 
@@ -540,9 +889,15 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           class={`path-input-box ${focusedSide() === "left" ? "box-focused" : ""}`}
           onClick={() => setFocusedSide("left")}
         >
-          <span class="side-badge left">LEFT</span>
+          <span class="side-badge left">
+            {props.leftTitle ? `LEFT: ${props.leftTitle}` : "LEFT"}
+          </span>
+          <Show when={props.leftReadonly}>
+            <span class="meta-tag" title="只读锁定 (-ro1)">🔒 只读</span>
+          </Show>
           <input
             class="path-text-input"
+            list={`mru-left-${props.sessionId}`}
             placeholder="输入左侧文件路径回车，或直接在下方 Ctrl+V 粘贴文本..."
             value={leftPath()}
             onInput={(e) => setLeftPath(e.currentTarget.value)}
@@ -550,12 +905,16 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               e.key === "Enter" && handleLoadSingleDiskFile(true, leftPath())
             }
           />
+          <datalist id={`mru-left-${props.sessionId}`}>
+            <For each={recentLeftPaths()}>{(p) => <option value={p} />}</For>
+          </datalist>
           <Show when={summary().left_dirty}>
             <span class="dirty-dot" title="左侧有未保存修改">●</span>
           </Show>
           <span class="meta-tag">{summary().left_line_count} 行</span>
           <button
             class="browse-btn"
+            disabled={props.leftReadonly}
             title="从剪贴板粘贴文本到左侧 (Ctrl+V)"
             onClick={() => handleReadClipboardAndPaste(true)}
           >
@@ -580,9 +939,15 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           class={`path-input-box ${focusedSide() === "right" ? "box-focused" : ""}`}
           onClick={() => setFocusedSide("right")}
         >
-          <span class="side-badge right">RIGHT</span>
+          <span class="side-badge right">
+            {props.rightTitle ? `RIGHT: ${props.rightTitle}` : "RIGHT"}
+          </span>
+          <Show when={props.rightReadonly}>
+            <span class="meta-tag" title="只读锁定 (-ro2)">🔒 只读</span>
+          </Show>
           <input
             class="path-text-input"
+            list={`mru-right-${props.sessionId}`}
             placeholder="输入右侧文件路径回车，或直接在下方 Ctrl+V 粘贴文本..."
             value={rightPath()}
             onInput={(e) => setRightPath(e.currentTarget.value)}
@@ -590,12 +955,16 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               e.key === "Enter" && handleLoadSingleDiskFile(false, rightPath())
             }
           />
+          <datalist id={`mru-right-${props.sessionId}`}>
+            <For each={recentRightPaths()}>{(p) => <option value={p} />}</For>
+          </datalist>
           <Show when={summary().right_dirty}>
             <span class="dirty-dot" title="右侧有未保存修改">●</span>
           </Show>
           <span class="meta-tag">{summary().right_line_count} 行</span>
           <button
             class="browse-btn"
+            disabled={props.rightReadonly}
             title="从剪贴板粘贴文本到右侧 (Ctrl+V)"
             onClick={() => handleReadClipboardAndPaste(false)}
           >
@@ -617,90 +986,170 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         </div>
       </div>
 
-      {/* Main Custom Virtual Scrolling Viewport */}
-      <VirtualDiffViewport
-        totalRows={summary().total_virtual_rows}
-        leftLineCount={summary().left_line_count}
-        rightLineCount={summary().right_line_count}
-        focusedSide={focusedSide()}
-        allSelectedSide={allSelectedSide()}
-        hunks={summary().hunks}
-        activeHunkId={currentHunk()?.id ?? null}
-        selectedRowIdx={selectedRow()?.virtual_idx ?? null}
-        fetchSlice={fetchSlice}
-        onFocusSide={(side) => {
-          setFocusedSide(side);
-          if (allSelectedSide() && allSelectedSide() !== side) {
+      {/* Main Stage: Optional Changed Files Sidebar + Custom Virtual Scrolling Viewport */}
+      <div style={{ display: "flex", flex: "1", "min-height": "0", overflow: "hidden" }}>
+        <Show when={showFilesSidebar() && (props.siblingFiles?.length ?? 0) > 0}>
+          <aside
+            style={{
+              width: "240px",
+              "border-right": "1px solid var(--border-color)",
+              background: "var(--bg-panel)",
+              display: "flex",
+              "flex-direction": "column",
+              "flex-shrink": "0",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: "6px 10px",
+                "font-size": "12px",
+                "font-weight": "600",
+                "border-bottom": "1px solid var(--border-color)",
+                display: "flex",
+                "justify-content": "space-between",
+                "align-items": "center",
+              }}
+            >
+              <span>📂 变更文件 ({props.siblingFiles!.length})</span>
+              <span style={{ "font-size": "11px", opacity: "0.7" }}>[ / ] 切换</span>
+            </div>
+            <div style={{ flex: "1", "overflow-y": "auto", padding: "4px 0" }}>
+              <For each={props.siblingFiles}>
+                {(item, idx) => {
+                  const isActive = () => idx() === currentSiblingIdx();
+                  const statusBadge =
+                    item.status === "modified"
+                      ? "≠"
+                      : item.status === "left_only"
+                      ? "←"
+                      : item.status === "right_only"
+                      ? "→"
+                      : "=";
+                  return (
+                    <div
+                      onClick={() => switchToSiblingFile(idx())}
+                      style={{
+                        padding: "5px 10px",
+                        cursor: "pointer",
+                        "font-size": "12px",
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "6px",
+                        background: isActive()
+                          ? "rgba(59, 130, 246, 0.22)"
+                          : "transparent",
+                        "border-left": isActive()
+                          ? "3px solid #3b82f6"
+                          : "3px solid transparent",
+                        "white-space": "nowrap",
+                        overflow: "hidden",
+                        "text-overflow": "ellipsis",
+                      }}
+                      title={item.relativePath}
+                    >
+                      <span style={{ opacity: "0.8", "font-family": "monospace" }}>
+                        {statusBadge}
+                      </span>
+                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>
+                        {item.relativePath}
+                      </span>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </aside>
+        </Show>
+
+        <VirtualDiffViewport
+          totalRows={summary().total_virtual_rows}
+          leftLineCount={summary().left_line_count}
+          rightLineCount={summary().right_line_count}
+          focusedSide={focusedSide()}
+          allSelectedSide={allSelectedSide()}
+          hunks={summary().hunks}
+          activeHunkId={currentHunk()?.id ?? null}
+          selectedRowIdx={selectedRow()?.virtual_idx ?? null}
+          editorFontSize={editorFontSize()}
+          showWhitespaceGlyphs={showWhitespaceGlyphs()}
+          fetchSlice={fetchSlice}
+          onFocusSide={(side) => {
+            setFocusedSide(side);
+            if (allSelectedSide() && allSelectedSide() !== side) {
+              setAllSelectedSide(null);
+            }
+          }}
+          onPasteToSide={handlePasteTextToSide}
+          onSelectRow={(row) => {
             setAllSelectedSide(null);
-          }
-        }}
-        onPasteToSide={handlePasteTextToSide}
-        onSelectRow={(row) => {
-          setAllSelectedSide(null);
-          setSelectedRow(row);
-          if (row.hunk_id !== null) {
-            const idx = summary().hunks.findIndex((h) => h.id === row.hunk_id);
-            if (idx >= 0) setActiveHunkIdx(idx);
-          }
-        }}
-        onMergeHunk={handleMergeHunk}
-        onEditLine={handleEditLine}
-        scrollTriggerRow={scrollTriggerRow()}
-      />
+            setSelectedRow(row);
+            if (row.hunk_id !== null) {
+              const idx = summary().hunks.findIndex((h) => h.id === row.hunk_id);
+              if (idx >= 0) setActiveHunkIdx(idx);
+            }
+          }}
+          onMergeHunk={handleMergeHunk}
+          onEditLine={handleEditLine}
+          scrollTriggerRow={scrollTriggerRow()}
+        />
+      </div>
 
       {/* Beyond Compare Signature Bottom Line Detail Comparison Pane */}
-      <div class="bottom-line-inspector">
-        <div class="inspector-header">
-          <span>
-            🔍 当前行详情对比 (点击左/右窗格可直接 Ctrl+V 粘贴全文、Ctrl+A 全选单侧、Ctrl+C 拷贝全文、双击行直接修改)
-          </span>
-          <Show when={selectedRow()}>
-            {(row) => (
-              <span class="inspector-coords">
-                焦点侧: {focusedSide() === "left" ? "左 (LEFT)" : "右 (RIGHT)"} | 虚拟行 #
-                {row().virtual_idx + 1} | 左行号: {row().left_line_no ?? "Gap"} | 右行号:{" "}
-                {row().right_line_no ?? "Gap"}
-              </span>
-            )}
-          </Show>
-        </div>
-        <div class="inspector-rows">
-          <div class="inspector-line left-detail">
-            <span class="inspector-side-label">左 (L)</span>
-            <code class="inspector-code">
-              <Show
-                when={selectedRow()?.left_inline?.length}
-                fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
-              >
-                <For each={selectedRow()!.left_inline}>
-                  {(seg) => (
-                    <span class={seg.tag === "delete" ? "inline-char-delete" : ""}>
-                      {seg.text}
-                    </span>
-                  )}
-                </For>
-              </Show>
-            </code>
+      <Show when={showLineInspector()}>
+        <div class="bottom-line-inspector">
+          <div class="inspector-header">
+            <span>
+              🔍 当前行详情对比 (点击左/右窗格可直接 Ctrl+V 粘贴全文、Ctrl+A 全选单侧、Ctrl+C 拷贝全文、双击行直接修改)
+            </span>
+            <Show when={selectedRow()}>
+              {(row) => (
+                <span class="inspector-coords">
+                  焦点侧: {focusedSide() === "left" ? "左 (LEFT)" : "右 (RIGHT)"} | 虚拟行 #
+                  {row().virtual_idx + 1} | 左行号: {row().left_line_no ?? "Gap"} | 右行号:{" "}
+                  {row().right_line_no ?? "Gap"}
+                </span>
+              )}
+            </Show>
           </div>
-          <div class="inspector-line right-detail">
-            <span class="inspector-side-label">右 (R)</span>
-            <code class="inspector-code">
-              <Show
-                when={selectedRow()?.right_inline?.length}
-                fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
-              >
-                <For each={selectedRow()!.right_inline}>
-                  {(seg) => (
-                    <span class={seg.tag === "insert" ? "inline-char-insert" : ""}>
-                      {seg.text}
-                    </span>
-                  )}
-                </For>
-              </Show>
-            </code>
+          <div class="inspector-rows">
+            <div class="inspector-line left-detail">
+              <span class="inspector-side-label">左 (L)</span>
+              <code class="inspector-code">
+                <Show
+                  when={selectedRow()?.left_inline?.length}
+                  fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
+                >
+                  <For each={selectedRow()!.left_inline}>
+                    {(seg) => (
+                      <span class={seg.tag === "delete" ? "inline-char-delete" : ""}>
+                        {seg.text}
+                      </span>
+                    )}
+                  </For>
+                </Show>
+              </code>
+            </div>
+            <div class="inspector-line right-detail">
+              <span class="inspector-side-label">右 (R)</span>
+              <code class="inspector-code">
+                <Show
+                  when={selectedRow()?.right_inline?.length}
+                  fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
+                >
+                  <For each={selectedRow()!.right_inline}>
+                    {(seg) => (
+                      <span class={seg.tag === "insert" ? "inline-char-insert" : ""}>
+                        {seg.text}
+                      </span>
+                    )}
+                  </For>
+                </Show>
+              </code>
+            </div>
           </div>
         </div>
-      </div>
+      </Show>
 
       {/* Native Disk File Browser Modal */}
       <Show when={browserTargetSide()}>

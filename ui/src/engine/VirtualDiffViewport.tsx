@@ -20,6 +20,8 @@ interface VirtualDiffViewportProps {
   hunks: TwoWayHunk[];
   activeHunkId: number | null;
   selectedRowIdx: number | null;
+  editorFontSize?: number;
+  showWhitespaceGlyphs?: boolean;
   fetchSlice: (startRow: number, count: number) => ViewportRowDto[];
   onFocusSide: (side: "left" | "right") => void;
   onPasteToSide: (isLeft: boolean, pastedText: string) => void;
@@ -222,7 +224,10 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       <span class="line-num-gutter">
                         {row.left_line_no ?? ""}
                       </span>
-                      <div class="line-code-content">
+                      <div
+                        class="line-code-content"
+                        style={{ "font-size": `${props.editorFontSize ?? 13}px` }}
+                      >
                         <Show
                           when={!isEditing()}
                           fallback={
@@ -243,7 +248,12 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                             />
                           }
                         >
-                          {renderRichLine(row.status, row.left_inline, row.left_tokens)}
+                          {renderRichLine(
+                            row.status,
+                            row.left_inline,
+                            row.left_tokens,
+                            props.showWhitespaceGlyphs
+                          )}
                         </Show>
                       </div>
                     </div>
@@ -389,7 +399,10 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       <span class="line-num-gutter">
                         {row.right_line_no ?? ""}
                       </span>
-                      <div class="line-code-content">
+                      <div
+                        class="line-code-content"
+                        style={{ "font-size": `${props.editorFontSize ?? 13}px` }}
+                      >
                         <Show
                           when={!isEditing()}
                           fallback={
@@ -410,7 +423,12 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                             />
                           }
                         >
-                          {renderRichLine(row.status, row.right_inline, row.right_tokens)}
+                          {renderRichLine(
+                            row.status,
+                            row.right_inline,
+                            row.right_tokens,
+                            props.showWhitespaceGlyphs
+                          )}
                         </Show>
                       </div>
                     </div>
@@ -436,10 +454,16 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
   );
 };
 
+function formatGlyphText(text: string, showGlyphs?: boolean): string {
+  if (!showGlyphs) return text;
+  return text.replace(/ /g, "·").replace(/\t/g, "→   ");
+}
+
 function renderRichLine(
   status: DiffStatus,
   inlineSegs: InlineSegment[],
-  syntaxTokens: SyntaxToken[]
+  syntaxTokens: SyntaxToken[],
+  showWhitespaceGlyphs?: boolean
 ) {
   if (status !== "equal" && inlineSegs.length > 0) {
     return (
@@ -454,7 +478,7 @@ function renderRichLine(
                 : ""
             }
           >
-            {seg.text}
+            {formatGlyphText(seg.text, showWhitespaceGlyphs)}
           </span>
         )}
       </For>
@@ -463,7 +487,11 @@ function renderRichLine(
 
   return (
     <For each={syntaxTokens}>
-      {(tok) => <span class={`tok-${tok.kind}`}>{tok.text}</span>}
+      {(tok) => (
+        <span class={`tok-${tok.kind}`}>
+          {formatGlyphText(tok.text, showWhitespaceGlyphs)}
+        </span>
+      )}
     </For>
   );
 }

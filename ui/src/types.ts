@@ -150,6 +150,13 @@ export interface FolderDiffResult {
 
 export type SessionTabKind = "home" | "two_way" | "folder" | "three_way";
 
+export interface SiblingDiffFileItem {
+  relativePath: string;
+  leftFullPath: string;
+  rightFullPath: string;
+  status: FolderItemStatus;
+}
+
 export interface WorkspaceTab {
   id: string;
   title: string;
@@ -157,4 +164,10 @@ export interface WorkspaceTab {
   leftPath?: string;
   rightPath?: string;
   basePath?: string;
+  outputPath?: string;
+  titles?: [string | null, string | null, string | null, string | null];
+  readonly?: [boolean, boolean, boolean];
+  expandAll?: boolean;
+  filters?: string[];
+  siblingFiles?: SiblingDiffFileItem[];
 }
