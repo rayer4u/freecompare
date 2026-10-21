@@ -1,0 +1,20 @@
+[package]
+name = "freecompare-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fcompare"
+path = "src/main.rs"
+
+[[bin]]
+name = "fc"
+path = "src/main.rs"
+
+[dependencies]
+freecompare-core = { path = "../core" }
+freecompare-app = { path = "../../src-tauri" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

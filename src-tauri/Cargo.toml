@@ -1,0 +1,31 @@
+[package]
+name = "freecompare-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "freecompare_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+freecompare-core = { path = "../crates/core" }
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+
+[features]
+default = []
+desktop = ["dep:tauri"]
+
+[dependencies.tauri]
+version = "2.1"
+optional = true
+features = []
+
+[build-dependencies]
+tauri-build = { version = "2.0", optional = true }
+
+[dev-dependencies]
+tempfile = "3.13"
