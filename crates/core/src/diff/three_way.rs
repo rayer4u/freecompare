@@ -215,51 +215,77 @@ impl ThreeWaySession {
                 ThreeWayStatus::Conflict
             };
 
-            let v_start = rows.len();
-            let max_len = b_slice.len().max(l_slice.len()).max(r_slice.len());
-            let hunk_id = if status != ThreeWayStatus::Equal {
-                Some(hunks.len())
+            // Split large conflict intervals on common equal anchor lines between Left and Right
+            // so independent edits inside a region don't bloat into one giant conflict hunk.
+            let sub_blocks = if status == ThreeWayStatus::Conflict && b_slice.len() >= 2 && l_slice.len() >= 2 && r_slice.len() >= 2 {
+                split_conflict_on_common_anchors(&b_range, &l_range, &r_range, &base_lines, &left_lines, &right_lines)
             } else {
-                None
+                vec![(b_range, l_range, r_range)]
             };
 
-            for offset in 0..max_len {
-                let l_idx = (offset < l_slice.len()).then_some(l_range.start + offset);
-                let b_idx = (offset < b_slice.len()).then_some(b_range.start + offset);
-                let r_idx = (offset < r_slice.len()).then_some(r_range.start + offset);
+            for (sb_range, sl_range, sr_range) in sub_blocks {
+                let sb_slice = &base_lines[sb_range.start.min(base_lines.len())..sb_range.end.min(base_lines.len())];
+                let sl_slice = &left_lines[sl_range.start.min(left_lines.len())..sl_range.end.min(left_lines.len())];
+                let sr_slice = &right_lines[sr_range.start.min(right_lines.len())..sr_range.end.min(right_lines.len())];
 
-                rows.push(ThreeWayRow {
-                    virtual_idx: rows.len(),
-                    left_line_no: l_idx.map(|i| i + 1),
-                    base_line_no: b_idx.map(|i| i + 1),
-                    right_line_no: r_idx.map(|i| i + 1),
-                    left_text: l_idx.and_then(|i| left_lines.get(i).cloned()),
-                    base_text: b_idx.and_then(|i| base_lines.get(i).cloned()),
-                    right_text: r_idx.and_then(|i| right_lines.get(i).cloned()),
-                    status,
-                    hunk_id,
-                });
-            }
-
-            if let Some(id) = hunk_id {
-                let resolution = match status {
-                    ThreeWayStatus::LeftModified | ThreeWayStatus::BothModifiedIdentical => {
-                        ConflictResolution::UseLeft
-                    }
-                    ThreeWayStatus::RightModified => ConflictResolution::UseRight,
-                    ThreeWayStatus::Conflict => ConflictResolution::Unresolved,
-                    ThreeWayStatus::Equal => ConflictResolution::UseBase,
+                let sub_status = if sb_slice == sl_slice && sb_slice == sr_slice {
+                    ThreeWayStatus::Equal
+                } else if sb_slice != sl_slice && sb_slice == sr_slice {
+                    ThreeWayStatus::LeftModified
+                } else if sb_slice == sl_slice && sb_slice != sr_slice {
+                    ThreeWayStatus::RightModified
+                } else if sl_slice == sr_slice {
+                    ThreeWayStatus::BothModifiedIdentical
+                } else {
+                    ThreeWayStatus::Conflict
                 };
-                hunks.push(ThreeWayHunk {
-                    id,
-                    status,
-                    resolution,
-                    virtual_start: v_start,
-                    virtual_end: rows.len(),
-                    base_range: b_range,
-                    left_range: l_range,
-                    right_range: r_range,
-                });
+
+                let v_start = rows.len();
+                let max_len = sb_slice.len().max(sl_slice.len()).max(sr_slice.len());
+                let hunk_id = if sub_status != ThreeWayStatus::Equal {
+                    Some(hunks.len())
+                } else {
+                    None
+                };
+
+                for offset in 0..max_len {
+                    let l_idx = (offset < sl_slice.len()).then_some(sl_range.start + offset);
+                    let b_idx = (offset < sb_slice.len()).then_some(sb_range.start + offset);
+                    let r_idx = (offset < sr_slice.len()).then_some(sr_range.start + offset);
+
+                    rows.push(ThreeWayRow {
+                        virtual_idx: rows.len(),
+                        left_line_no: l_idx.map(|i| i + 1),
+                        base_line_no: b_idx.map(|i| i + 1),
+                        right_line_no: r_idx.map(|i| i + 1),
+                        left_text: l_idx.and_then(|i| left_lines.get(i).cloned()),
+                        base_text: b_idx.and_then(|i| base_lines.get(i).cloned()),
+                        right_text: r_idx.and_then(|i| right_lines.get(i).cloned()),
+                        status: sub_status,
+                        hunk_id,
+                    });
+                }
+
+                if let Some(id) = hunk_id {
+                    let resolution = match sub_status {
+                        ThreeWayStatus::LeftModified | ThreeWayStatus::BothModifiedIdentical => {
+                            ConflictResolution::UseLeft
+                        }
+                        ThreeWayStatus::RightModified => ConflictResolution::UseRight,
+                        ThreeWayStatus::Conflict => ConflictResolution::Unresolved,
+                        ThreeWayStatus::Equal => ConflictResolution::UseBase,
+                    };
+                    hunks.push(ThreeWayHunk {
+                        id,
+                        status: sub_status,
+                        resolution,
+                        virtual_start: v_start,
+                        virtual_end: rows.len(),
+                        base_range: sb_range,
+                        left_range: sl_range,
+                        right_range: sr_range,
+                    });
+                }
             }
         }
 
@@ -392,4 +418,54 @@ fn compute_change_ranges(
         ));
     });
     changes
+}
+
+fn split_conflict_on_common_anchors(
+    b_range: &Range<usize>,
+    l_range: &Range<usize>,
+    r_range: &Range<usize>,
+    base_lines: &[String],
+    left_lines: &[String],
+    right_lines: &[String],
+) -> Vec<(Range<usize>, Range<usize>, Range<usize>)> {
+    let mut sub_blocks = Vec::new();
+    let mut b_cur = b_range.start;
+    let mut l_cur = l_range.start;
+    let mut r_cur = r_range.start;
+
+    for bi in b_range.start..b_range.end {
+        let b_line = &base_lines[bi];
+        if b_line.trim().is_empty() {
+            continue;
+        }
+        // Find if `b_line` appears uniquely in the remaining slice of left and right
+        let l_matches: Vec<usize> = (l_cur..l_range.end)
+            .filter(|&li| &left_lines[li] == b_line)
+            .collect();
+        let r_matches: Vec<usize> = (r_cur..r_range.end)
+            .filter(|&ri| &right_lines[ri] == b_line)
+            .collect();
+
+        if l_matches.len() == 1 && r_matches.len() == 1 {
+            let li = l_matches[0];
+            let ri = r_matches[0];
+            if bi > b_cur || li > l_cur || ri > r_cur {
+                sub_blocks.push((b_cur..bi, l_cur..li, r_cur..ri));
+            }
+            sub_blocks.push((bi..(bi + 1), li..(li + 1), ri..(ri + 1)));
+            b_cur = bi + 1;
+            l_cur = li + 1;
+            r_cur = ri + 1;
+        }
+    }
+
+    if b_cur < b_range.end || l_cur < l_range.end || r_cur < r_range.end {
+        sub_blocks.push((b_cur..b_range.end, l_cur..l_range.end, r_cur..r_range.end));
+    }
+
+    if sub_blocks.is_empty() {
+        vec![(b_range.clone(), l_range.clone(), r_range.clone())]
+    } else {
+        sub_blocks
+    }
 }

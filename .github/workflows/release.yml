@@ -21,8 +21,16 @@ jobs:
         os: [ubuntu-22.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Build Frontend UI Assets
+        working-directory: ./ui
+        run: |
+          npm install
+          npm run build
       - name: Run Workspace Unit & Integration Tests
         run: cargo test --workspace
 
@@ -70,7 +78,7 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Release Binaries (fcompare & fc)
+      - name: Build Release Binary (fcompare)
         run: cargo build --release -p freecompare-cli --target ${{ matrix.target }}
 
       - name: Package Portable Archive (Unix)
@@ -78,7 +86,6 @@ jobs:
         run: |
           mkdir -p dist-pkg/ui
           cp target/${{ matrix.target }}/release/fcompare dist-pkg/
-          cp target/${{ matrix.target }}/release/fc dist-pkg/
           cp -r ui/dist dist-pkg/ui/
           cp README.md dist-pkg/
           tar -czf ${{ matrix.artifact_name }}.tar.gz -C dist-pkg .
@@ -89,7 +96,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist-pkg/ui | Out-Null
           Copy-Item target/${{ matrix.target }}/release/fcompare.exe dist-pkg/
-          Copy-Item target/${{ matrix.target }}/release/fc.exe dist-pkg/
           Copy-Item -Recurse ui/dist dist-pkg/ui/
           Copy-Item README.md dist-pkg/
           Compress-Archive -Path dist-pkg/* -DestinationPath ${{ matrix.artifact_name }}.zip

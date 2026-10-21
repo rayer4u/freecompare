@@ -1,8 +1,9 @@
 use anyhow::Result;
 use freecompare_app_lib::AppBackend;
 use freecompare_core::{
+    cli_args::{exit_codes, CliInvocation},
     folder::{compare_folders, FolderCompareOptions},
-    DiffOptions, ThreeWaySession, TwoWaySession,
+    DiffOptions, ThreeWaySession, TwoWaySession, UserPreferences,
 };
 use serde_json::{json, Value};
 use std::env;
@@ -16,6 +17,8 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
 struct LifecycleTracker {
     client_connected: AtomicBool,
@@ -48,73 +51,107 @@ fn now_ms() -> u64 {
 fn main() -> Result<()> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
 
-    if raw_args.iter().any(|a| a == "-h" || a == "--help") {
+    let inv = match CliInvocation::parse(&raw_args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("Error: {err}\nRun `fcompare --help` for usage.");
+            std::process::exit(exit_codes::ERROR_OR_MISSING_ARGS);
+        }
+    };
+
+    if inv.show_help {
         print_help();
         return Ok(());
     }
 
-    let cli_only = raw_args.iter().any(|a| a == "--cli" || a == "--summary");
-    let no_open = raw_args.iter().any(|a| a == "--no-open" || a == "--headless");
-    let port_override = raw_args
-        .windows(2)
-        .find(|w| w[0] == "--port")
-        .and_then(|w| w[1].parse::<u16>().ok());
-
-    let positional: Vec<PathBuf> = raw_args
-        .iter()
-        .enumerate()
-        .filter(|(idx, a)| {
-            if a.starts_with('-') {
-                return false;
-            }
-            if *idx > 0 && raw_args[*idx - 1] == "--port" {
-                return false;
-            }
-            true
-        })
-        .map(|(_, a)| PathBuf::from(a))
-        .collect();
-
-    if cli_only {
-        return run_cli_summary(&positional);
+    if inv.print_git_config || inv.install_git_config {
+        return handle_git_integration(inv.install_git_config);
     }
 
     let backend = Arc::new(AppBackend::new());
-    if !positional.is_empty() {
-        match backend.configure_startup_paths(&positional) {
-            Ok(launch) => {
-                println!(
-                    "⚡ FreeCompare: Prepared {:?} session for {} ↔ {}",
-                    launch.kind, launch.left_path, launch.right_path
-                );
-            }
-            Err(err) => {
+
+    // 1. Handle `-qc` / `-quickcompare[=<mode>]` headless comparison with BC standard exit codes
+    if inv.quick_compare.is_some() {
+        let code = backend.execute_quick_compare(&inv);
+        if !inv.silent {
+            println!("QuickCompare exit code: {code}");
+        }
+        std::process::exit(code);
+    }
+
+    // 2. Handle `--cli` / `--summary` terminal summary mode
+    if inv.cli_summary {
+        return run_cli_summary(&inv);
+    }
+
+    // 3. Configure startup session from CLI paths & flags
+    let launch = match backend.configure_from_cli(&inv) {
+        Ok(l) => l,
+        Err(err) => {
+            if !inv.silent {
                 eprintln!("⚠️ Warning: {err}");
+            }
+            if inv.automerge || inv.silent {
+                std::process::exit(exit_codes::ERROR_OR_MISSING_ARGS);
+            }
+            Default::default()
+        }
+    };
+
+    // 4. Handle `-automerge` (and `-force` / `-reviewconflicts`) for 3-way merge
+    if inv.automerge {
+        if let Some(ref sid) = launch.session_id {
+            let guard = backend.manager.three_way_sessions.read();
+            if let Some(session) = guard.get(sid) {
+                let summary = session.summary();
+                if summary.unresolved_conflicts == 0 || inv.force {
+                    let target = launch.output_path.as_deref().map(Path::new);
+                    if let Err(e) = session.save_merged(target) {
+                        if !inv.silent {
+                            eprintln!("Failed to write automerge output: {e}");
+                        }
+                        std::process::exit(exit_codes::ERROR_OR_MISSING_ARGS);
+                    }
+                    let code = if summary.unresolved_conflicts == 0 {
+                        exit_codes::SAME
+                    } else {
+                        exit_codes::MERGE_CONFLICT_OR_ABORTED
+                    };
+                    std::process::exit(code);
+                } else if !inv.review_conflicts && inv.silent {
+                    // Unresolved conflicts and silent mode requested -> exit with conflict code
+                    std::process::exit(exit_codes::MERGE_CONFLICT_OR_ABORTED);
+                }
             }
         }
     }
 
-    let bind_addr = format!("127.0.0.1:{}", port_override.unwrap_or(0));
+    let bind_addr = format!("127.0.0.1:{}", inv.port_override.unwrap_or(0));
     let listener = TcpListener::bind(&bind_addr)?;
     let local_port = listener.local_addr()?.port();
     let ui_url = format!("http://127.0.0.1:{local_port}");
     let ui_dist = locate_ui_dist();
     let tracker = Arc::new(LifecycleTracker::new());
 
-    println!("🚀 FreeCompare UI listening at {ui_url}");
-    if !no_open {
-        spawn_native_app_window(&ui_url);
+    if !inv.silent {
+        println!("🚀 FreeCompare UI listening at {ui_url}");
+    }
+
+    if !inv.no_open_window {
+        let initial_prefs = backend.get_user_preferences();
+        spawn_native_app_window(&ui_url, &initial_prefs);
         let tracker_watchdog = Arc::clone(&tracker);
+        let backend_watchdog = Arc::clone(&backend);
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(500));
                 if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) {
-                    // Grace period of 400ms in case user merely refreshed the page
                     std::thread::sleep(Duration::from_millis(400));
-                    if now_ms().saturating_sub(tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst))
+                    if now_ms()
+                        .saturating_sub(tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst))
                         >= 350
                     {
-                        std::process::exit(0);
+                        std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
                     } else {
                         tracker_watchdog
                             .shutdown_requested
@@ -126,7 +163,7 @@ fn main() -> Result<()> {
                         tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst),
                     );
                     if idle_ms > 4500 {
-                        std::process::exit(0);
+                        std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
                     }
                 }
             }
@@ -151,17 +188,158 @@ fn main() -> Result<()> {
 }
 
 fn print_help() {
-    println!("FreeCompare (fcompare / fc) v0.1.0 — Cross-Platform Diff & Merge Tool");
+    println!("FreeCompare (fcompare) v0.1.0 — Beyond Compare & Git Compatible Diff/Merge Tool");
     println!();
     println!("USAGE:");
-    println!("  fcompare                                     # Launch UI (Text / Folder / 3-Way)");
-    println!("  fcompare <left_dir> <right_dir>              # Launch Folder Compare UI");
-    println!("  fcompare <left_file> <right_file>            # Launch Text Compare UI");
-    println!("  fcompare <left> <base> <right> [output]      # Launch 3-Way Merge UI (git mergetool)");
-    println!("  fcompare <left> <right> --cli                # Print terminal summary without UI");
+    println!("  fcompare [options] [<left> [<right> [<center/base> [<output>]]]]");
+    println!();
+    println!("POSITIONAL ARGUMENTS (All Optional):");
+    println!("  0 paths : Launch New Session Home UI");
+    println!("  1 path  : Open Text or Folder Compare with Left side pre-loaded");
+    println!("  2 paths : Open 2-Way Text Compare or Folder Compare");
+    println!("  3 paths : Open 3-Way Merge (<left> <right> <center/base>)");
+    println!("  4 paths : Open 3-Way Merge (<left> <right> <center/base> <merged_output>)");
+    println!();
+    println!("BEYOND COMPARE & GIT COMPATIBLE OPTIONS:");
+    println!("  -title1=<text>, -lefttitle=<text>      Custom title for Left pane");
+    println!("  -title2=<text>, -righttitle=<text>     Custom title for Right pane");
+    println!("  -title3=<text>, -centertitle=<text>    Custom title for Center/Base pane");
+    println!("  -title4=<text>, -outputtitle=<text>    Custom title for Output pane");
+    println!("  -ro, -ro1, -ro2, -ro3                  Read-only mode (all, left, right, or center)");
+    println!("  -automerge                             Automatically merge non-conflicting changes");
+    println!("  -reviewconflicts                       Open UI if -automerge finds conflicts");
+    println!("  -force                                 Write conflict markers when automerging");
+    println!("  -favorleft / -favorright               Auto-resolve conflicts favoring Left or Right");
+    println!("  -mergeoutput=<path>                    Explicit output path for merged result");
+    println!("  -qc[=<mode>], -quickcompare[=<mode>]   Silent comparison (rules, binary, crc, size)");
+    println!("  -fv=<type>, -fileviewer=<type>         Force viewer (Text Compare, Folder Compare, Text Merge)");
+    println!("  -expandall                             Expand all subfolders initially");
+    println!("  -filters=<globs>                       Semicolon-separated filter rules");
+    println!("  -solo, -wait / -nowait                 Wait for UI window closure (default: wait)");
+    println!("  --git-config / --install-git           Print or install global Git difftool/mergetool config");
 }
 
-fn run_cli_summary(paths: &[PathBuf]) -> Result<()> {
+/// Resolves the current executable path normalized for cross-platform Git configuration
+/// (strips Windows `\\?\` extended-length UNC prefix and converts `\` to `/` for Git MSYS2 sh compatibility).
+fn resolve_git_compatible_exe_path() -> String {
+    let raw_path = env::current_exe()
+        .ok()
+        .and_then(|p| {
+            if p.is_absolute() {
+                Some(p)
+            } else {
+                env::current_dir().ok().map(|cwd| cwd.join(p))
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("fcompare"));
+
+    let mut path_str = raw_path.to_string_lossy().to_string();
+    // Strip Windows extended-length path prefix (`\\?\`) which breaks Git for Windows sh.exe
+    if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+        path_str = stripped.to_string();
+    }
+    path_str.replace('\\', "/")
+}
+
+fn handle_git_integration(install: bool) -> Result<()> {
+    let exe_path = resolve_git_compatible_exe_path();
+
+    let diff_cmd = format!(
+        "\"{exe_path}\" -ro1 -title1=\"$LOCAL (HEAD)\" -title2=\"$REMOTE (Working Tree)\" \"$LOCAL\" \"$REMOTE\""
+    );
+    let merge_cmd = format!(
+        "\"{exe_path}\" -automerge -reviewconflicts -title1=\"LOCAL\" -title2=\"REMOTE\" -title3=\"BASE\" -title4=\"MERGED\" \"$LOCAL\" \"$REMOTE\" \"$BASE\" \"$MERGED\""
+    );
+
+    if !install {
+        println!("# ============================================================================");
+        println!("# 方案 A: 直接接管 Git 内置的 Beyond Compare (`bc`) 驱动 (零脚本侵入，推荐)");
+        println!("# ============================================================================");
+        println!("git config --global diff.tool bc");
+        println!("git config --global difftool.prompt false");
+        println!("git config --global difftool.bc.path \"{exe_path}\"");
+        println!("git config --global merge.tool bc");
+        println!("git config --global mergetool.prompt false");
+        println!("git config --global mergetool.bc.path \"{exe_path}\"");
+        println!("git config --global mergetool.bc.trustExitCode true");
+        println!();
+        println!("# ============================================================================");
+        println!("# 方案 B: 注册独立的 `freecompare` 驱动 (自动携带自定义标题栏与 -automerge)");
+        println!("# ============================================================================");
+        println!("git config --global diff.tool freecompare");
+        println!("git config --global difftool.freecompare.cmd '{diff_cmd}'");
+        println!("git config --global merge.tool freecompare");
+        println!("git config --global mergetool.freecompare.cmd '{merge_cmd}'");
+        println!("git config --global mergetool.freecompare.trustExitCode true");
+        return Ok(());
+    }
+
+    // 1. Pre-flight check: verify `git` is installed and accessible in PATH
+    match Command::new("git").arg("--version").output() {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            anyhow::bail!(
+                "未检测到 `git` 命令。请先安装 Git 并确保 `git` 在系统的 PATH 环境变量中。"
+            );
+        }
+    }
+
+    let commands: &[(&str, &str)] = &[
+        ("diff.tool", "bc"),
+        ("difftool.prompt", "false"),
+        ("difftool.bc.path", &exe_path),
+        ("difftool.bc3.path", &exe_path),
+        ("difftool.bc4.path", &exe_path),
+        ("difftool.freecompare.cmd", &diff_cmd),
+        ("merge.tool", "bc"),
+        ("mergetool.prompt", "false"),
+        ("mergetool.bc.path", &exe_path),
+        ("mergetool.bc.trustExitCode", "true"),
+        ("mergetool.bc3.path", &exe_path),
+        ("mergetool.bc3.trustExitCode", "true"),
+        ("mergetool.bc4.path", &exe_path),
+        ("mergetool.bc4.trustExitCode", "true"),
+        ("mergetool.freecompare.cmd", &merge_cmd),
+        ("mergetool.freecompare.trustExitCode", "true"),
+    ];
+
+    // Prefer `--global`, fallback to local repository config if `--global` fails (e.g. read-only HOME)
+    let mut scope = "--global";
+    if Command::new("git")
+        .args(["config", "--global", "diff.tool", "bc"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        scope = "--local";
+    }
+
+    for (k, v) in commands {
+        let status = Command::new("git")
+            .args(["config", scope, k, v])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("无法写入 Git 配置项 `{k}` (scope: {scope})");
+        }
+    }
+
+    // Read-back verification to confirm Git recorded the exact binary path
+    let verified_diff = Command::new("git")
+        .args(["config", scope, "--get", "difftool.bc.path"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    println!("✅ 已成功将 FreeCompare 配置为 Git ({scope}) 的默认 difftool 与 mergetool！");
+    println!("   可执行文件绑定路径 : {verified_diff}");
+    println!("   已接管驱动         : bc / bc3 / bc4 / freecompare (内置单文件 UI，零外部目录依赖)");
+    println!("   现在可在任意仓库运行: `git difftool`、`git difftool --dir-diff` 或 `git mergetool`");
+    Ok(())
+}
+
+fn run_cli_summary(inv: &CliInvocation) -> Result<()> {
+    let paths = &inv.paths;
     match paths.len() {
         2 => {
             let left = &paths[0];
@@ -195,10 +373,11 @@ fn run_cli_summary(paths: &[PathBuf]) -> Result<()> {
             }
         }
         3 | 4 => {
+            // BC order: [0]=Left, [1]=Right, [2]=Center/Base, [3]=Output
             let left = &paths[0];
-            let base = &paths[1];
-            let right = &paths[2];
-            let out = paths.get(3).cloned();
+            let right = &paths[1];
+            let base = &paths[2];
+            let out = inv.resolved_merge_output_path();
             let session = ThreeWaySession::from_files(left, base, right, out)?;
             let sum = session.summary();
             println!(
@@ -207,7 +386,7 @@ fn run_cli_summary(paths: &[PathBuf]) -> Result<()> {
                 sum.unresolved_conflicts
             );
             if sum.unresolved_conflicts > 0 {
-                std::process::exit(1);
+                std::process::exit(exit_codes::MERGE_CONFLICT_OR_ABORTED);
             }
         }
         _ => {
@@ -260,6 +439,26 @@ fn handle_http_connection(
     }
 
     if path == "/api/shutdown" {
+        let mut body = vec![0u8; content_length];
+        let _ = reader.read_exact(&mut body);
+        let mut immediate = body == b"immediate";
+        if let Ok(payload) = serde_json::from_slice::<Value>(&body) {
+            if payload["immediate"].as_bool() == Some(true) {
+                immediate = true;
+            }
+            if payload.get("window_width").is_some() || payload.get("window_x").is_some() {
+                let _ = backend.dispatch_rpc("update_user_preferences", &payload);
+            }
+        }
+        if immediate {
+            let _ = write_json_response(&mut stream, 200, &json!({ "ok": true }));
+            let code = backend.exit_code.load(Ordering::SeqCst);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(80));
+                std::process::exit(code);
+            });
+            return Ok(());
+        }
         tracker.shutdown_requested.store(true, Ordering::SeqCst);
         return write_json_response(&mut stream, 200, &json!({ "ok": true }));
     }
@@ -280,14 +479,13 @@ fn handle_http_connection(
         };
     }
 
+    let rel = path.trim_start_matches('/');
+    let rel_target = if rel.is_empty() { "index.html" } else { rel };
+
+    // 1. Try disk `ui/dist` directory first (allows hot-reloading during local UI development)
     if let Some(dist_dir) = ui_dist {
         tracker.touch();
-        let rel = path.trim_start_matches('/');
-        let file_path = if rel.is_empty() {
-            dist_dir.join("index.html")
-        } else {
-            dist_dir.join(rel)
-        };
+        let file_path = dist_dir.join(rel_target);
         let resolved = if file_path.is_file() {
             file_path
         } else {
@@ -306,7 +504,23 @@ fn handle_http_connection(
         }
     }
 
-    let fallback = b"FreeCompare UI dist not found. Please run `cd ui && npm run build`.";
+    // 2. Fallback to compile-time embedded UI assets (enables standalone single-binary distribution!)
+    if let Some((asset_rel, bytes)) = get_embedded_ui_asset(rel_target)
+        .map(|b| (rel_target, b))
+        .or_else(|| get_embedded_ui_asset("index.html").map(|b| ("index.html", b)))
+    {
+        tracker.touch();
+        let mime = guess_mime(Path::new(asset_rel));
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        );
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(bytes)?;
+        return Ok(());
+    }
+
+    let fallback = b"FreeCompare UI assets not found. Please build UI first (`cd ui && npm run build`).";
     let header = format!(
         "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         fallback.len()
@@ -345,32 +559,68 @@ fn guess_mime(path: &Path) -> &'static str {
 
 fn locate_ui_dist() -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Ok(custom) = env::var("FREECOMPARE_UI_DIST") {
+        candidates.push(PathBuf::from(custom));
+    }
     if let Ok(cwd) = env::current_dir() {
         candidates.push(cwd.join("ui").join("dist"));
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("ui").join("dist"));
+            candidates.push(parent.join("..").join("share").join("freecompare").join("ui").join("dist"));
             candidates.push(parent.join("..").join("..").join("ui").join("dist"));
         }
     }
+    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("freecompare")
+                .join("ui")
+                .join("dist"),
+        );
+    }
+    candidates.push(PathBuf::from("/usr/local/share/freecompare/ui/dist"));
     candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/dist"));
     candidates.into_iter().find(|p| p.join("index.html").is_file())
 }
 
-fn spawn_native_app_window(url: &str) {
+fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
     let app_arg = format!("--app={url}");
+    let width = prefs.window_width.max(640);
+    let height = prefs.window_height.max(480);
+    let size_arg = format!("--window-size={width},{height}");
+    let pos_arg = prefs
+        .window_x
+        .zip(prefs.window_y)
+        .map(|(x, y)| format!("--window-position={x},{y}"));
+
+    let build_chromium_args = || {
+        let mut args = vec![app_arg.clone(), "--new-window".to_string()];
+        if prefs.window_maximized {
+            args.push("--start-maximized".to_string());
+        } else {
+            args.push(size_arg.clone());
+        }
+        if let Some(ref p) = pos_arg {
+            args.push(p.clone());
+        }
+        args
+    };
 
     #[cfg(target_os = "linux")]
     {
-        for bin in ["google-chrome", "chromium", "chromium-browser", "microsoft-edge"] {
-            if Command::new(bin)
-                .arg(&app_arg)
-                .arg("--new-window")
-                .arg("--window-size=1440,900")
-                .spawn()
-                .is_ok()
-            {
+        let args = build_chromium_args();
+        for bin in [
+            "google-chrome",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "brave-browser",
+        ] {
+            if Command::new(bin).args(&args).spawn().is_ok() {
                 return;
             }
         }
@@ -379,11 +629,43 @@ fn spawn_native_app_window(url: &str) {
 
     #[cfg(target_os = "macos")]
     {
+        let args = build_chromium_args();
+        for app_bin in [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ] {
+            if Path::new(app_bin).is_file()
+                && Command::new(app_bin).args(&args).spawn().is_ok()
+            {
+                return;
+            }
+        }
         let _ = Command::new("open").arg(url).spawn();
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd").args(["/C", "start", url]).spawn();
+        let args = build_chromium_args();
+        let mut candidates = vec![
+            PathBuf::from("msedge.exe"),
+            PathBuf::from("chrome.exe"),
+        ];
+        for env_key in ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"] {
+            if let Ok(base) = env::var(env_key) {
+                let base_path = PathBuf::from(base);
+                candidates.push(base_path.join(r"Microsoft\Edge\Application\msedge.exe"));
+                candidates.push(base_path.join(r"Google\Chrome\Application\chrome.exe"));
+            }
+        }
+        for bin in candidates {
+            if Command::new(&bin).args(&args).spawn().is_ok() {
+                return;
+            }
+        }
+        let _ = Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn();
     }
 }

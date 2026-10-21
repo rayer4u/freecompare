@@ -1,13 +1,15 @@
-import { Component, createSignal, For, Match, onMount, Switch } from "solid-js";
-import { callRustRpc, StartupLaunchSessionDto } from "./bridge";
+import { Component, createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import { callRustRpc, StartupLaunchSessionDto, UserPreferencesDto } from "./bridge";
 import { SessionTabKind, WorkspaceTab } from "./types";
 import { HomeView } from "./views/HomeView";
 import { TextDiffView } from "./views/TextDiffView";
 import { FolderDiffView } from "./views/FolderDiffView";
 import { Merge3WayView } from "./views/Merge3WayView";
+import { SettingsModal } from "./components/SettingsModal";
 
 export const App: Component = () => {
   const [theme, setTheme] = createSignal<"dark" | "light">("dark");
+  const [showSettings, setShowSettings] = createSignal(false);
   // Start cleanly on the Home tab without any pre-populated fake demo tabs!
   const [tabs, setTabs] = createSignal<WorkspaceTab[]>([
     { id: "tab-home", title: "🏠 新建会话", kind: "home" },
@@ -21,7 +23,8 @@ export const App: Component = () => {
     title: string,
     leftPath?: string,
     rightPath?: string,
-    basePath?: string
+    basePath?: string,
+    extra?: Partial<WorkspaceTab>
   ) => {
     const id = `tab-${kind}-${tabCounter++}`;
     const prefix =
@@ -39,47 +42,137 @@ export const App: Component = () => {
       leftPath,
       rightPath,
       basePath,
+      ...extra,
     };
     setTabs((prev) => [...prev, nextTab]);
     setActiveTabId(id);
   };
 
+  const collectWindowGeometry = (immediate = false) => {
+    const w = Math.max(640, window.outerWidth || window.innerWidth || 1440);
+    const h = Math.max(480, window.outerHeight || window.innerHeight || 900);
+    const x = typeof window.screenX === "number" ? window.screenX : 0;
+    const y = typeof window.screenY === "number" ? window.screenY : 0;
+    const availW = window.screen?.availWidth || 1920;
+    const availH = window.screen?.availHeight || 1080;
+    const maximized = w >= availW - 16 && h >= availH - 32;
+    return {
+      immediate,
+      window_width: w,
+      window_height: h,
+      window_x: x,
+      window_y: y,
+      window_maximized: maximized,
+    };
+  };
+
   onMount(async () => {
+    let lastGeomKey = "";
+    const syncWindowGeometry = () => {
+      const geom = collectWindowGeometry(false);
+      const key = `${geom.window_width}x${geom.window_height}@${geom.window_x},${geom.window_y}:${geom.window_maximized}`;
+      if (key !== lastGeomKey) {
+        lastGeomKey = key;
+        callRustRpc("update_user_preferences", geom).catch(() => {});
+      }
+    };
+
     const heartbeatTimer = window.setInterval(() => {
       fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
+      syncWindowGeometry();
     }, 1500);
 
+    let resizeDebounce: number | undefined;
+    const handleResize = () => {
+      if (resizeDebounce) window.clearTimeout(resizeDebounce);
+      resizeDebounce = window.setTimeout(syncWindowGeometry, 250);
+    };
+    window.addEventListener("resize", handleResize);
+
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === ",") {
+        e.preventDefault();
+        setShowSettings((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalShortcuts);
+
     const handlePageHide = () => {
+      const payload = JSON.stringify(collectWindowGeometry(false));
       if (navigator.sendBeacon) {
-        navigator.sendBeacon("/api/shutdown", "bye");
+        navigator.sendBeacon("/api/shutdown", payload);
       } else {
-        fetch("/api/shutdown", { method: "POST", keepalive: true }).catch(() => {});
+        fetch("/api/shutdown", {
+          method: "POST",
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
       }
     };
     window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("beforeunload", handlePageHide);
 
+    const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
+    if (prefs?.theme === "light" || prefs?.theme === "dark") {
+      setTheme(prefs.theme);
+    }
+    if (prefs && !prefs.window_maximized) {
+      try {
+        if (prefs.window_width >= 640 && prefs.window_height >= 480) {
+          window.resizeTo(prefs.window_width, prefs.window_height);
+        }
+        if (prefs.window_x !== null && prefs.window_y !== null) {
+          window.moveTo(prefs.window_x, prefs.window_y);
+        }
+      } catch {
+        // Ignore if browser security restricts window.moveTo/resizeTo
+      }
+    }
+
     const startup = await callRustRpc<StartupLaunchSessionDto | null>(
       "get_startup_session"
     );
     if (startup && startup.kind) {
+      const extra: Partial<WorkspaceTab> = {
+        outputPath: startup.output_path ?? undefined,
+        titles: startup.titles,
+        readonly: startup.readonly,
+        expandAll: startup.expand_all,
+        filters: startup.filters,
+      };
       if (startup.kind === "folder_compare") {
-        launchSession("folder", startup.title, startup.left_path, startup.right_path);
+        launchSession(
+          "folder",
+          startup.title,
+          startup.left_path || undefined,
+          startup.right_path || undefined,
+          undefined,
+          extra
+        );
       } else if (startup.kind === "two_way_text") {
-        launchSession("two_way", startup.title, startup.left_path, startup.right_path);
+        launchSession(
+          "two_way",
+          startup.title,
+          startup.left_path || undefined,
+          startup.right_path || undefined,
+          undefined,
+          extra
+        );
       } else if (startup.kind === "three_way_merge") {
         launchSession(
           "three_way",
           startup.title,
-          startup.left_path,
-          startup.right_path,
-          startup.base_path ?? undefined
+          startup.left_path || undefined,
+          startup.right_path || undefined,
+          startup.base_path ?? undefined,
+          extra
         );
       }
     }
 
     return () => {
       window.clearInterval(heartbeatTimer);
+      window.removeEventListener("resize", handleResize);
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("beforeunload", handlePageHide);
     };
@@ -96,6 +189,31 @@ export const App: Component = () => {
       const nextActive = filtered[Math.max(0, idx - 1)];
       setActiveTabId(nextActive.id);
     }
+  };
+
+  /**
+   * Handles Beyond Compare's signature `Esc` / `Ctrl+W` / `q` action:
+   * - If the user opened a child file tab from Folder Compare (`git difftool -d`), close the child tab and return to the Folder Compare tab!
+   * - Otherwise (e.g. single-file `git difftool` or top-level window), immediately terminate `fcompare` so Git launches the next changed file!
+   */
+  const handleCloseOrExitActiveSession = async () => {
+    const current = activeTab();
+    const allTabs = tabs();
+    // If there is a parent Folder Compare tab and we are inside a Two-Way file tab opened from it, pop back to Folder tab
+    const folderTab = allTabs.find((t) => t.kind === "folder");
+    if (current.kind === "two_way" && folderTab && allTabs.length > 2) {
+      const filtered = allTabs.filter((t) => t.id !== current.id);
+      setTabs(filtered);
+      setActiveTabId(folderTab.id);
+      return;
+    }
+
+    // Otherwise exit the process & close window immediately (saving window geometry in the same call) so `git difftool` advances to the next file!
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify(collectWindowGeometry(true)),
+    }).catch(() => {});
+    window.close();
   };
 
   const activeTab = () => tabs().find((t) => t.id === activeTabId()) ?? tabs()[0];
@@ -143,11 +261,22 @@ export const App: Component = () => {
 
         <div class="app-header-right">
           <span class="shortcut-hint">
-            Ctrl+V 粘贴 · Ctrl+A 全选单侧 · Ctrl+C 拷出 · Alt+↑/↓ 跳差异
+            Esc 下个文件/退回 · Alt+↑/↓ (或 n/p) 跳差异 · [/] 切上/下文件 · Ctrl+B 文件列表 · Ctrl+, 设置
           </span>
           <button
             class="theme-toggle-btn"
-            onClick={() => setTheme(theme() === "dark" ? "light" : "dark")}
+            onClick={() => setShowSettings(true)}
+            title="偏好设置 (Ctrl+,)"
+          >
+            ⚙️ 设置
+          </button>
+          <button
+            class="theme-toggle-btn"
+            onClick={() => {
+              const next = theme() === "dark" ? "light" : "dark";
+              setTheme(next);
+              callRustRpc("update_user_preferences", { theme: next }).catch(() => {});
+            }}
           >
             {theme() === "dark" ? "☀️ 浅色主题" : "🌙 深色主题"}
           </button>
@@ -168,18 +297,35 @@ export const App: Component = () => {
               sessionId={activeTab().id}
               initialLeftPath={activeTab().leftPath}
               initialRightPath={activeTab().rightPath}
+              leftTitle={activeTab().titles?.[0] ?? undefined}
+              rightTitle={activeTab().titles?.[1] ?? undefined}
+              leftReadonly={activeTab().readonly?.[0]}
+              rightReadonly={activeTab().readonly?.[1]}
+              siblingFiles={activeTab().siblingFiles}
+              onCloseOrExit={handleCloseOrExitActiveSession}
+              onUpdateTabTitle={(newTitle) => {
+                const curId = activeTab().id;
+                setTabs((prev) =>
+                  prev.map((t) =>
+                    t.id === curId ? { ...t, title: "⇄ " + newTitle } : t
+                  )
+                );
+              }}
             />
           </Match>
           <Match when={activeTab().kind === "folder"}>
             <FolderDiffView
               initialLeftDir={activeTab().leftPath}
               initialRightDir={activeTab().rightPath}
-              onOpenFileDiff={(leftFullPath, rightFullPath, relPath) =>
+              onCloseOrExit={handleCloseOrExitActiveSession}
+              onOpenFileDiff={(leftFullPath, rightFullPath, relPath, siblingFiles) =>
                 launchSession(
                   "two_way",
                   relPath.split("/").pop() ?? relPath,
                   leftFullPath,
-                  rightFullPath
+                  rightFullPath,
+                  undefined,
+                  { siblingFiles }
                 )
               }
             />
@@ -190,10 +336,24 @@ export const App: Component = () => {
               initialLeftPath={activeTab().leftPath}
               initialBasePath={activeTab().basePath}
               initialRightPath={activeTab().rightPath}
+              initialOutputPath={activeTab().outputPath}
+              titles={activeTab().titles}
+              onCloseOrExit={handleCloseOrExitActiveSession}
             />
           </Match>
         </Switch>
       </main>
+
+      <Show when={showSettings()}>
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onPreferencesUpdated={(p) => {
+            if (p.theme === "dark" || p.theme === "light") {
+              setTheme(p.theme);
+            }
+          }}
+        />
+      </Show>
     </div>
   );
 };

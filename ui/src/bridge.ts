@@ -36,6 +36,10 @@ export interface StartupLaunchSessionDto {
   right_path: string;
   base_path: string | null;
   output_path: string | null;
+  titles: [string | null, string | null, string | null, string | null];
+  readonly: [boolean, boolean, boolean];
+  expand_all: boolean;
+  filters: string[];
 }
 
 export interface SessionRecordDto {
@@ -47,6 +51,34 @@ export interface SessionRecordDto {
   base_path: string | null;
   output_path: string | null;
   updated_at_ms: number;
+}
+
+export interface UserPreferencesDto {
+  theme: "dark" | "light";
+  ignore_whitespace: boolean;
+  ignore_case: boolean;
+  text_row_filter: "all" | "diffs" | "equals";
+  folder_compare_mode: "hash" | "fast";
+  folder_filter_status: "all" | "diffs" | "orphans" | "equals";
+  folder_exclude_globs: string[];
+  show_files_sidebar: boolean;
+  last_browsed_dir: string | null;
+  window_width: number;
+  window_height: number;
+  window_x: number | null;
+  window_y: number | null;
+  window_maximized: boolean;
+  show_line_inspector: boolean;
+  editor_font_size: number;
+  tab_width: number;
+  show_whitespace_glyphs: boolean;
+  syntax_highlighting: boolean;
+  auto_jump_first_diff: boolean;
+  wrap_around_navigation: boolean;
+  confirm_before_exit_dirty: boolean;
+  recent_left_paths: string[];
+  recent_right_paths: string[];
+  recent_folder_paths: string[];
 }
 
 /**

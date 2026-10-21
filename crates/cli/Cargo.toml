@@ -8,10 +8,6 @@ license.workspace = true
 name = "fcompare"
 path = "src/main.rs"
 
-[[bin]]
-name = "fc"
-path = "src/main.rs"
-
 [dependencies]
 freecompare-core = { path = "../core" }
 freecompare-app = { path = "../../src-tauri" }

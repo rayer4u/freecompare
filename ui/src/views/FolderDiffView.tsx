@@ -1,12 +1,28 @@
-import { Component, createMemo, createSignal, For, onMount, Show } from "solid-js";
-import { callRustRpc, createBlankFolderDiff, recomputeFolderStats } from "../bridge";
+import { Component, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  callRustRpc,
+  createBlankFolderDiff,
+  recomputeFolderStats,
+  UserPreferencesDto,
+} from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
-import { FolderDiffResult, FolderEntryDto, FolderItemStatus } from "../types";
+import {
+  FolderDiffResult,
+  FolderEntryDto,
+  FolderItemStatus,
+  SiblingDiffFileItem,
+} from "../types";
 
 interface FolderDiffViewProps {
   initialLeftDir?: string;
   initialRightDir?: string;
-  onOpenFileDiff: (leftFullPath: string, rightFullPath: string, relativePath: string) => void;
+  onCloseOrExit?: () => void;
+  onOpenFileDiff: (
+    leftFullPath: string,
+    rightFullPath: string,
+    relativePath: string,
+    siblingFiles: SiblingDiffFileItem[]
+  ) => void;
 }
 
 type FilterStatus = "all" | "diffs" | "orphans" | "equals";
@@ -23,6 +39,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [selectedRelPath, setSelectedRelPath] = createSignal<string | null>(null);
   const [compareMode, setCompareMode] = createSignal<"hash" | "fast">("hash");
   const [browserSide, setBrowserSide] = createSignal<"left" | "right" | null>(null);
+  const [recentFolders, setRecentFolders] = createSignal<string[]>([]);
   const [toast, setToast] = createSignal<string | null>(null);
 
   const notify = (msg: string) => {
@@ -51,8 +68,13 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         setFolderData(res);
         setLeftInput(res.left_root);
         setRightInput(res.right_root);
-        if (res.entries.length > 0) {
-          setSelectedRelPath(res.entries[0].relative_path);
+        // Prefer selecting the first modified/diff file automatically (like Beyond Compare)
+        const firstDiffFile =
+          res.entries.find((e) => !e.is_dir && e.status !== "equal") ??
+          res.entries.find((e) => !e.is_dir) ??
+          res.entries[0];
+        if (firstDiffFile) {
+          setSelectedRelPath(firstDiffFile.relative_path);
         }
         notify(`已扫描目录: 共 ${res.stats.total_items} 个文件`);
       }
@@ -61,10 +83,121 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     }
   };
 
-  onMount(() => {
+  const buildSiblingDiffFiles = (): SiblingDiffFileItem[] => {
+    const lRoot = folderData().left_root.replace(/\/$/, "");
+    const rRoot = folderData().right_root.replace(/\/$/, "");
+    return visibleEntries()
+      .filter((e) => !e.is_dir)
+      .map((e) => ({
+        relativePath: e.relative_path,
+        leftFullPath: `${lRoot}/${e.relative_path}`,
+        rightFullPath: `${rRoot}/${e.relative_path}`,
+        status: e.status,
+      }));
+  };
+
+  const openEntry = (entry: FolderEntryDto) => {
+    if (!entry.is_dir) {
+      const lRoot = folderData().left_root.replace(/\/$/, "");
+      const rRoot = folderData().right_root.replace(/\/$/, "");
+      props.onOpenFileDiff(
+        `${lRoot}/${entry.relative_path}`,
+        `${rRoot}/${entry.relative_path}`,
+        entry.relative_path,
+        buildSiblingDiffFiles()
+      );
+    } else {
+      toggleDir(entry.relative_path);
+    }
+  };
+
+  const handleFolderKeyDown = (e: KeyboardEvent) => {
+    const activeEl = document.activeElement;
+    if (
+      activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement ||
+      browserSide()
+    ) {
+      return;
+    }
+
+    if (e.key === "Escape" || e.key === "q" || (e.ctrlKey && e.key.toLowerCase() === "w")) {
+      e.preventDefault();
+      props.onCloseOrExit?.();
+      return;
+    }
+
+    const list = visibleEntries();
+    if (list.length === 0) return;
+    const curIdx = list.findIndex((item) => item.relative_path === selectedRelPath());
+
+    if (e.key === "ArrowDown" || e.key === "j" || (e.altKey && e.key === "ArrowDown")) {
+      e.preventDefault();
+      if (e.altKey) {
+        // Jump to next modified/diff file
+        for (let step = 1; step <= list.length; step++) {
+          const cand = list[(Math.max(0, curIdx) + step) % list.length];
+          if (!cand.is_dir && cand.status !== "equal") {
+            setSelectedRelPath(cand.relative_path);
+            return;
+          }
+        }
+      }
+      const nextIdx = Math.min(list.length - 1, curIdx + 1);
+      setSelectedRelPath(list[nextIdx].relative_path);
+    } else if (e.key === "ArrowUp" || e.key === "k" || (e.altKey && e.key === "ArrowUp")) {
+      e.preventDefault();
+      if (e.altKey) {
+        for (let step = 1; step <= list.length; step++) {
+          const cand = list[(Math.max(0, curIdx) - step + list.length) % list.length];
+          if (!cand.is_dir && cand.status !== "equal") {
+            setSelectedRelPath(cand.relative_path);
+            return;
+          }
+        }
+      }
+      const prevIdx = Math.max(0, curIdx - 1);
+      setSelectedRelPath(list[prevIdx].relative_path);
+    } else if (e.key === "Enter" || e.key === " ") {
+      if (curIdx >= 0) {
+        e.preventDefault();
+        openEntry(list[curIdx]);
+      }
+    } else if (e.key.toLowerCase() === "d" && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      setFilterStatus((prev) => (prev === "diffs" ? "all" : "diffs"));
+    }
+  };
+
+  const updateFilterAndPersist = (next: FilterStatus) => {
+    setFilterStatus(next);
+    callRustRpc("update_user_preferences", { folder_filter_status: next }).catch(() => {});
+  };
+
+  onMount(async () => {
+    window.addEventListener("keydown", handleFolderKeyDown);
+    const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
+    if (prefs) {
+      if (prefs.folder_compare_mode === "hash" || prefs.folder_compare_mode === "fast") {
+        setCompareMode(prefs.folder_compare_mode);
+      }
+      if (
+        prefs.folder_filter_status === "all" ||
+        prefs.folder_filter_status === "diffs" ||
+        prefs.folder_filter_status === "orphans" ||
+        prefs.folder_filter_status === "equals"
+      ) {
+        setFilterStatus(prefs.folder_filter_status);
+      }
+      setRecentFolders(prefs.recent_folder_paths ?? []);
+    }
     if (props.initialLeftDir && props.initialRightDir) {
       scanRealFolders(props.initialLeftDir, props.initialRightDir);
     }
+  });
+
+  onCleanup(() => {
+    window.removeEventListener("keydown", handleFolderKeyDown);
   });
 
   const toggleDir = (relPath: string) => {
@@ -196,25 +329,25 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         <div class="bc-toolbar-group">
           <button
             class={`bc-tool-btn ${filterStatus() === "all" ? "active" : ""}`}
-            onClick={() => setFilterStatus("all")}
+            onClick={() => updateFilterAndPersist("all")}
           >
             ✱ 全部项
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "diffs" ? "active" : ""}`}
-            onClick={() => setFilterStatus("diffs")}
+            onClick={() => updateFilterAndPersist("diffs")}
           >
             ≠ 仅差异
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "orphans" ? "active" : ""}`}
-            onClick={() => setFilterStatus("orphans")}
+            onClick={() => updateFilterAndPersist("orphans")}
           >
             ◐ 仅孤立项
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "equals" ? "active" : ""}`}
-            onClick={() => setFilterStatus("equals")}
+            onClick={() => updateFilterAndPersist("equals")}
           >
             ＝ 仅相同
           </button>
@@ -234,6 +367,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             onClick={() => {
               const next = compareMode() === "hash" ? "fast" : "hash";
               setCompareMode(next);
+              callRustRpc("update_user_preferences", {
+                folder_compare_mode: next,
+              }).catch(() => {});
               if (leftInput() && rightInput()) {
                 scanRealFolders(leftInput(), rightInput());
               }
@@ -283,6 +419,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <span class="side-badge left">LEFT DIR</span>
           <input
             class="path-text-input"
+            list="mru-folder-paths"
             placeholder="输入或浏览选择左侧文件夹路径..."
             value={leftInput()}
             onInput={(e) => setLeftInput(e.currentTarget.value)}
@@ -298,6 +435,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <span class="side-badge right">RIGHT DIR</span>
           <input
             class="path-text-input"
+            list="mru-folder-paths"
             placeholder="输入或浏览选择右侧文件夹路径..."
             value={rightInput()}
             onInput={(e) => setRightInput(e.currentTarget.value)}
@@ -305,6 +443,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               e.key === "Enter" && scanRealFolders(leftInput(), rightInput())
             }
           />
+          <datalist id="mru-folder-paths">
+            <For each={recentFolders()}>{(p) => <option value={p} />}</For>
+          </datalist>
           <button class="browse-btn" onClick={() => setBrowserSide("right")}>
             📂 浏览...
           </button>
@@ -353,19 +494,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 isCollapsed={collapsedDirs().has(entry.relative_path)}
                 onSelect={() => setSelectedRelPath(entry.relative_path)}
                 onToggleDir={() => toggleDir(entry.relative_path)}
-                onOpenDiff={() => {
-                  if (!entry.is_dir) {
-                    const lRoot = folderData().left_root.replace(/\/$/, "");
-                    const rRoot = folderData().right_root.replace(/\/$/, "");
-                    props.onOpenFileDiff(
-                      `${lRoot}/${entry.relative_path}`,
-                      `${rRoot}/${entry.relative_path}`,
-                      entry.relative_path
-                    );
-                  } else {
-                    toggleDir(entry.relative_path);
-                  }
-                }}
+                onOpenDiff={() => openEntry(entry)}
                 onCopyRight={() => handleCopyItem("left_to_right", entry.relative_path)}
                 onCopyLeft={() => handleCopyItem("right_to_left", entry.relative_path)}
               />
