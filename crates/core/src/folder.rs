@@ -160,7 +160,10 @@ pub fn compare_subfolder(
     let mut stats = FolderDiffStats::default();
 
     let mut sub_opts = options.clone();
-    sub_opts.recursive = true;
+    if !options.recursive {
+        sub_opts.recursive = false;
+        sub_opts.max_depth = Some(base_depth);
+    }
 
     compare_dir_recursive(
         left_base,
@@ -217,6 +220,10 @@ fn compare_dir_recursive(
     out: &mut Vec<FolderEntryDto>,
     stats: &mut FolderDiffStats,
 ) -> std::io::Result<()> {
+    if out.len() >= 30000 {
+        return Ok(());
+    }
+
     let left_dir = left_root.join(rel_dir);
     let right_dir = right_root.join(rel_dir);
 

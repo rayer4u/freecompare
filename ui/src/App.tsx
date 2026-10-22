@@ -372,74 +372,85 @@ export const App: Component = () => {
       </header>
 
       <main class="app-main-stage">
-        <Switch>
-          <Match when={activeTab().kind === "home"}>
-            <HomeView
-              onLaunchSession={(kind, title, l, r, b) =>
-                launchSession(kind, title, l, r, b)
-              }
-            />
-          </Match>
-          <Match when={activeTab().kind === "two_way"}>
-            <TextDiffView
-              sessionId={activeTab().id}
-              initialLeftPath={activeTab().leftPath}
-              initialRightPath={activeTab().rightPath}
-              leftTitle={activeTab().titles?.[0] ?? undefined}
-              rightTitle={activeTab().titles?.[1] ?? undefined}
-              leftReadonly={activeTab().readonly?.[0]}
-              rightReadonly={activeTab().readonly?.[1]}
-              siblingFiles={activeTab().siblingFiles}
-              reviewMode={activeTab().reviewMode}
-              onCloseOrExit={handleCloseOrExitActiveSession}
-              onUpdateTabTitle={(newTitle) => {
-                const curId = activeTab().id;
-                setTabs((prev) =>
-                  prev.map((t) =>
-                    t.id === curId ? { ...t, title: "⇄ " + newTitle } : t
-                  )
-                );
+        <For each={tabs()}>
+          {(tab) => (
+            <div
+              class="tab-content-wrapper"
+              style={{
+                display: tab.id === activeTabId() ? "contents" : "none",
               }}
-            />
-          </Match>
-          <Match when={activeTab().kind === "folder"}>
-            <FolderDiffView
-              initialLeftDir={activeTab().leftPath}
-              initialRightDir={activeTab().rightPath}
-              expandAll={activeTab().expandAll}
-              onCloseOrExit={handleCloseOrExitActiveSession}
-              onOpenFileDiff={(leftFullPath, rightFullPath, relPath, siblingFiles) =>
-                launchSession(
-                  "two_way",
-                  relPath.split("/").pop() ?? relPath,
-                  leftFullPath,
-                  rightFullPath,
-                  undefined,
-                  { siblingFiles }
-                )
-              }
-              onOpenFolderDiff={(leftFullPath, rightFullPath, relPath) =>
-                launchSession(
-                  "folder",
-                  relPath.split("/").pop() ?? relPath,
-                  leftFullPath,
-                  rightFullPath
-                )
-              }
-            />
-          </Match>
-          <Match when={activeTab().kind === "three_way"}>
-            <Merge3WayView
-              sessionId={activeTab().id}
-              initialLeftPath={activeTab().leftPath}
-              initialBasePath={activeTab().basePath}
-              initialRightPath={activeTab().rightPath}
-              initialOutputPath={activeTab().outputPath}
-              titles={activeTab().titles}
-              onCloseOrExit={handleCloseOrExitActiveSession}
-            />
-          </Match>
-        </Switch>
+            >
+              <Show when={tab.kind === "home"}>
+                <HomeView
+                  onLaunchSession={(kind, title, l, r, b) =>
+                    launchSession(kind, title, l, r, b)
+                  }
+                />
+              </Show>
+              <Show when={tab.kind === "two_way"}>
+                <TextDiffView
+                  sessionId={tab.id}
+                  isActive={tab.id === activeTabId()}
+                  initialLeftPath={tab.leftPath}
+                  initialRightPath={tab.rightPath}
+                  leftTitle={tab.titles?.[0] ?? undefined}
+                  rightTitle={tab.titles?.[1] ?? undefined}
+                  leftReadonly={tab.readonly?.[0]}
+                  rightReadonly={tab.readonly?.[1]}
+                  siblingFiles={tab.siblingFiles}
+                  reviewMode={tab.reviewMode}
+                  onCloseOrExit={handleCloseOrExitActiveSession}
+                  onUpdateTabTitle={(newTitle) => {
+                    setTabs((prev) =>
+                      prev.map((t) =>
+                        t.id === tab.id ? { ...t, title: "⇄ " + newTitle } : t
+                      )
+                    );
+                  }}
+                />
+              </Show>
+              <Show when={tab.kind === "folder"}>
+                <FolderDiffView
+                  isActive={tab.id === activeTabId()}
+                  initialLeftDir={tab.leftPath}
+                  initialRightDir={tab.rightPath}
+                  expandAll={tab.expandAll}
+                  onCloseOrExit={handleCloseOrExitActiveSession}
+                  onOpenFileDiff={(leftFullPath, rightFullPath, relPath, siblingFiles) =>
+                    launchSession(
+                      "two_way",
+                      relPath.split("/").pop() ?? relPath,
+                      leftFullPath,
+                      rightFullPath,
+                      undefined,
+                      { siblingFiles }
+                    )
+                  }
+                  onOpenFolderDiff={(leftFullPath, rightFullPath, relPath) =>
+                    launchSession(
+                      "folder",
+                      relPath.split("/").pop() ?? relPath,
+                      leftFullPath,
+                      rightFullPath
+                    )
+                  }
+                />
+              </Show>
+              <Show when={tab.kind === "three_way"}>
+                <Merge3WayView
+                  sessionId={tab.id}
+                  isActive={tab.id === activeTabId()}
+                  initialLeftPath={tab.leftPath}
+                  initialBasePath={tab.basePath}
+                  initialRightPath={tab.rightPath}
+                  initialOutputPath={tab.outputPath}
+                  titles={tab.titles}
+                  onCloseOrExit={handleCloseOrExitActiveSession}
+                />
+              </Show>
+            </div>
+          )}
+        </For>
       </main>
 
       <Show when={showSettings()}>

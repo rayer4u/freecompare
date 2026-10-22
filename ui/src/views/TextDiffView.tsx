@@ -18,6 +18,7 @@ import {
 
 interface TextDiffViewProps {
   sessionId: string;
+  isActive?: boolean;
   initialLeftPath?: string;
   initialRightPath?: string;
   initialLeftContent?: string;
@@ -441,6 +442,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (props.isActive === false) return;
     const activeEl = document.activeElement;
     const isInputFocused =
       activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;

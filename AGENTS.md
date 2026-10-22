@@ -59,3 +59,25 @@ FreeCompare 的核心定位是全平台（Linux、macOS、Windows）单二进制
    - 审查拦截必须对 `.git/`、`.agents/`、`.gemini/`、`.system_generated/`、临时日志目录设置强制放行白名单，严防守卫修改自身配置时引发递归死锁。
 2. **标准流纯净性**：
    - `fcompare guard` 等协议子命令的标准输出 (`stdout`) 必须仅包含机器可解析的标准 JSON 响应，所有提示、UI 启动信息与排错日志必须全部重定向到 `stderr`。
+
+---
+
+## 6. Git 提交身份规范 (Git Commit Identity)
+
+当用户要求 Agent（AI）代为执行 Git 提交时，必须严格遵守以下身份隔离规范：
+
+1. **AI 提交者专属身份**：
+   - 所有代表 AI 进行的 Git 提交，Author 必须严格指定为：
+     ```text
+     Name: Antigravity
+     Email: antigravity@ai.invalid
+     ```
+2. **防撞车与防误关联红线**：
+   - **严禁**使用 `antigravity@google.com`（会被 GitHub 错误关联至非本人的外部自然人账号）。
+   - **严禁**使用 `*@users.noreply.github.com`（会撞车 GitHub 现存同名注册用户的系统隐私邮箱）。
+   - 必须使用 RFC 2606 保留的 `.invalid` 无效顶级域名，确保 GitHub 仅作纯文本显示，物理杜绝关联至任何外部第三方个人主页。
+3. **提交命令规范**：
+   ```bash
+   git commit --author="Antigravity <antigravity@ai.invalid>" -m "<type>: <description>"
+   ```
+

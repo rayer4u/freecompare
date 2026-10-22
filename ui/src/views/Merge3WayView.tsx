@@ -10,6 +10,7 @@ import { ConflictResolution, ThreeWayDiffResult, ThreeWayRow } from "../types";
 
 interface Merge3WayViewProps {
   sessionId: string;
+  isActive?: boolean;
   initialLeftPath?: string;
   initialBasePath?: string;
   initialRightPath?: string;
@@ -64,6 +65,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
   };
 
   const handleMergeKeyDown = (e: KeyboardEvent) => {
+    if (props.isActive === false) return;
     const activeEl = document.activeElement;
     if (
       activeEl instanceof HTMLInputElement ||

@@ -15,6 +15,7 @@ import {
 } from "../types";
 
 interface FolderDiffViewProps {
+  isActive?: boolean;
   initialLeftDir?: string;
   initialRightDir?: string;
   expandAll?: boolean;
@@ -108,8 +109,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     }
   };
 
-  const handleCompareSubfolder = async (subRel: string) => {
-    notify(`正在嵌套比较目录: ${subRel}...`);
+  const handleCompareSubfolder = async (subRel: string, recursive = false) => {
+    notify(`正在扫描子目录: ${subRel}...`);
     try {
       const res = await callRustRpc<FolderSubtreeResult>("compare_subfolder", {
         left_dir: folderData().left_root,
@@ -119,7 +120,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
           ignore_case_names: false,
           exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
-          recursive: true,
+          recursive,
         },
       });
       if (res) {
@@ -155,10 +156,16 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         setCollapsedDirs((prev) => {
           const next = new Set(prev);
           next.delete(res.relative_path);
+          // When scanning immediate children, collapse deeper nested subfolders by default
+          for (const item of res.entries) {
+            if (item.is_dir) {
+              next.add(item.relative_path);
+            }
+          }
           return next;
         });
 
-        notify(`已完成 ${res.relative_path} 的嵌套比较: 发现 ${res.entries.length} 个子项`);
+        notify(`已完成 ${res.relative_path} 的扫描: 发现 ${res.entries.length} 个子项`);
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err));
@@ -172,8 +179,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       .filter((e) => !e.is_dir)
       .map((e) => ({
         relativePath: e.relative_path,
-        leftFullPath: `${lRoot}/${e.relative_path}`,
-        rightFullPath: `${rRoot}/${e.relative_path}`,
+        leftFullPath:
+          e.status === "right_only" ? "" : `${lRoot}/${e.relative_path}`,
+        rightFullPath:
+          e.status === "left_only" ? "" : `${rRoot}/${e.relative_path}`,
         status: e.status,
       }));
   };
@@ -182,9 +191,13 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     if (!entry.is_dir) {
       const lRoot = folderData().left_root.replace(/\/$/, "");
       const rRoot = folderData().right_root.replace(/\/$/, "");
+      const leftFullPath =
+        entry.status === "right_only" ? "" : `${lRoot}/${entry.relative_path}`;
+      const rightFullPath =
+        entry.status === "left_only" ? "" : `${rRoot}/${entry.relative_path}`;
       props.onOpenFileDiff(
-        `${lRoot}/${entry.relative_path}`,
-        `${rRoot}/${entry.relative_path}`,
+        leftFullPath,
+        rightFullPath,
         entry.relative_path,
         buildSiblingDiffFiles()
       );
@@ -194,6 +207,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const handleFolderKeyDown = (e: KeyboardEvent) => {
+    if (props.isActive === false) return;
     const activeEl = document.activeElement;
     if (
       activeEl instanceof HTMLInputElement ||
@@ -295,7 +309,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         e.relative_path.startsWith(prefix)
       );
       if (!hasChildren) {
-        await handleCompareSubfolder(relPath);
+        await handleCompareSubfolder(relPath, isRecursiveScan());
         return;
       }
     }
@@ -308,15 +322,14 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const expandAll = async () => {
-    // If some folders are uncompared, trigger recursive scan to ensure all subfolders are compared & expanded
-    const hasUncompared = folderData().entries.some(
-      (e) => e.is_dir && e.status === "unknown"
-    );
-    if (hasUncompared) {
+    notify("正在展开所有文件夹...");
+    // If not in recursive full scan mode yet, trigger recursive scan to fetch all nested items
+    if (!isRecursiveScan()) {
       setIsRecursiveScan(true);
       await scanRealFolders(leftInput(), rightInput(), true);
     }
     setCollapsedDirs(new Set<string>());
+    notify("已展开全部文件夹");
   };
 
   const collapseAll = () => {
@@ -324,6 +337,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       .entries.filter((e) => e.is_dir)
       .map((e) => e.relative_path);
     setCollapsedDirs(new Set(dirs));
+    notify("已折叠全部文件夹");
   };
 
   const handleSwapFolders = () => {
@@ -624,6 +638,19 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 onSelect={() => setSelectedRelPath(entry.relative_path)}
                 onToggleDir={() => toggleDir(entry.relative_path)}
                 onOpenDiff={() => openEntry(entry)}
+                onOpenFolderDiff={
+                  entry.is_dir && props.onOpenFolderDiff
+                    ? () => {
+                        const lRoot = folderData().left_root.replace(/\/$/, "");
+                        const rRoot = folderData().right_root.replace(/\/$/, "");
+                        props.onOpenFolderDiff?.(
+                          `${lRoot}/${entry.relative_path}`,
+                          `${rRoot}/${entry.relative_path}`,
+                          entry.relative_path
+                        );
+                      }
+                    : undefined
+                }
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setSelectedRelPath(entry.relative_path);
@@ -655,7 +682,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 onClick={() => {
                   const rel = menu().entry.relative_path;
                   setContextMenu(null);
-                  handleCompareSubfolder(rel);
+                  handleCompareSubfolder(rel, true);
                 }}
               >
                 <span>🔍 嵌套比较此文件夹 (递归对比)</span>
@@ -783,6 +810,7 @@ const FolderRow: Component<{
   onSelect: () => void;
   onToggleDir: () => void;
   onOpenDiff: () => void;
+  onOpenFolderDiff?: () => void;
   onContextMenu: (e: MouseEvent) => void;
   onCopyRight: () => void;
   onCopyLeft: () => void;
@@ -791,13 +819,21 @@ const FolderRow: Component<{
   const hasLeft = () => props.entry.status !== "right_only";
   const hasRight = () => props.entry.status !== "left_only";
 
+  const handleRowDblClick = (e: MouseEvent) => {
+    if (props.entry.is_dir && (e.ctrlKey || e.metaKey) && props.onOpenFolderDiff) {
+      props.onOpenFolderDiff();
+      return;
+    }
+    props.onOpenDiff();
+  };
+
   return (
     <div
       class={`folder-row folder-status-${props.entry.status} ${
         props.isSelected ? "selected" : ""
       }`}
       onClick={props.onSelect}
-      onDblClick={props.onOpenDiff}
+      onDblClick={handleRowDblClick}
       onContextMenu={props.onContextMenu}
     >
       <div class="folder-col-left">
@@ -817,6 +853,18 @@ const FolderRow: Component<{
           <span class={hasLeft() ? "entry-label" : "entry-missing"}>
             {hasLeft() ? props.entry.name : "— (不存在)"}
           </span>
+          <Show when={props.entry.is_dir && props.onOpenFolderDiff}>
+            <button
+              class="dir-open-tab-btn"
+              title="在新的标签页中打开此文件夹比较 (或按住 Ctrl 双击)"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onOpenFolderDiff?.();
+              }}
+            >
+              📂
+            </button>
+          </Show>
           <Show when={props.entry.is_dir && props.entry.status === "unknown"}>
             <span class="uncompared-badge" title="未嵌套比较，右键选择“嵌套比较”或点击展开">
               未嵌套比较

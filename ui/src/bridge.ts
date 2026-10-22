@@ -741,17 +741,44 @@ export class CompareBackendClient {
     rightPath: string,
     options: DiffOptions
   ): Promise<TwoWayDiffResult | null> {
+    const trimmedL = leftPath.trim();
+    const trimmedR = rightPath.trim();
+
     const [leftRes, rightRes] = await Promise.all([
-      callRustRpc<ReadTextFileResult>("read_text_file", { path: leftPath }),
-      callRustRpc<ReadTextFileResult>("read_text_file", { path: rightPath }),
+      trimmedL
+        ? callRustRpc<ReadTextFileResult>("read_text_file", { path: trimmedL }).catch(() => ({
+            content: "",
+            path: trimmedL,
+            line_count: 0,
+            encoding: "UTF-8",
+          }))
+        : Promise.resolve({
+            content: "",
+            path: "",
+            line_count: 0,
+            encoding: "UTF-8",
+          }),
+      trimmedR
+        ? callRustRpc<ReadTextFileResult>("read_text_file", { path: trimmedR }).catch(() => ({
+            content: "",
+            path: trimmedR,
+            line_count: 0,
+            encoding: "UTF-8",
+          }))
+        : Promise.resolve({
+            content: "",
+            path: "",
+            line_count: 0,
+            encoding: "UTF-8",
+          }),
     ]);
 
-    if (!leftRes || !rightRes) return null;
+    if (!leftRes && !rightRes) return null;
 
     return CompareBackendClient.createTwoWaySession(
       sessionId,
-      leftRes.content,
-      rightRes.content,
+      leftRes?.content ?? "",
+      rightRes?.content ?? "",
       options
     );
   }

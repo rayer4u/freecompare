@@ -849,6 +849,23 @@ body {
   font-size: 12.5px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.08);
   cursor: pointer;
+  user-select: none;
+}
+
+.dir-open-tab-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  margin-left: 6px;
+  opacity: 0.55;
+  padding: 1px 4px;
+  border-radius: 3px;
+  transition: opacity 0.15s, background 0.15s;
+}
+.dir-open-tab-btn:hover {
+  opacity: 1;
+  background: var(--bg-hover);
 }
 
 .folder-row:hover {

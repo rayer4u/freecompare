@@ -375,3 +375,52 @@ fn test_folder_compare_non_recursive_and_subfolder_nested() {
     assert_eq!(sub_res.entries[0].name, "nested.txt");
     assert_eq!(sub_res.entries[0].status, FolderItemStatus::Modified);
 }
+
+#[test]
+fn test_folder_compare_multi_level_lazy_and_recursive_modes() {
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+
+    let deep_l = left_dir.path().join("level1/level2/level3");
+    let deep_r = right_dir.path().join("level1/level2/level3");
+    fs::create_dir_all(&deep_l).unwrap();
+    fs::create_dir_all(&deep_r).unwrap();
+
+    fs::write(deep_l.join("leaf.txt"), b"leaf_left_short").unwrap();
+    fs::write(deep_r.join("leaf.txt"), b"leaf_right_longer_content").unwrap();
+
+    let mut opts = FolderCompareOptions {
+        mode: FolderCompareMode::FastMetadata,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: false,
+        max_depth: None,
+    };
+
+    // 1. Initial compare: only level1 is returned, level2 is not loaded yet
+    let initial = compare_folders(left_dir.path(), right_dir.path(), &opts).unwrap();
+    assert_eq!(initial.entries.len(), 1);
+    assert_eq!(initial.entries[0].relative_path, "level1");
+    assert_eq!(initial.entries[0].status, FolderItemStatus::Unknown);
+
+    // 2. On-demand expanding level1: returns level1/level2 (as Unknown) without recursing to leaf
+    let sub1 = freecompare_core::folder::compare_subfolder(
+        left_dir.path(),
+        right_dir.path(),
+        "level1",
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(sub1.entries.len(), 1);
+    assert_eq!(sub1.entries[0].relative_path, "level1/level2");
+    assert!(sub1.entries[0].is_dir);
+    assert_eq!(sub1.entries[0].status, FolderItemStatus::Unknown);
+
+    // 3. Full recursive scan: all descendants are loaded
+    opts.recursive = true;
+    let full = compare_folders(left_dir.path(), right_dir.path(), &opts).unwrap();
+    assert_eq!(full.entries.len(), 4); // level1, level1/level2, level1/level2/level3, leaf.txt
+    let leaf = full.entries.iter().find(|e| e.name == "leaf.txt").unwrap();
+    assert_eq!(leaf.relative_path, "level1/level2/level3/leaf.txt");
+    assert_eq!(leaf.status, FolderItemStatus::Modified);
+}
