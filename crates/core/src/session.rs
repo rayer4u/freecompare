@@ -51,6 +51,7 @@ pub struct StartupLaunchSession {
 #[serde(default)]
 pub struct UserPreferences {
     pub theme: String,
+    pub language: String,
     pub ignore_whitespace: bool,
     pub ignore_case: bool,
     pub text_row_filter: String,
@@ -85,6 +86,7 @@ impl Default for UserPreferences {
     fn default() -> Self {
         Self {
             theme: "dark".to_string(),
+            language: "zh-CN".to_string(),
             ignore_whitespace: false,
             ignore_case: false,
             text_row_filter: "all".to_string(),

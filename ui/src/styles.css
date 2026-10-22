@@ -1,9 +1,16 @@
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Ubuntu, Cantarell, "Noto Sans", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, "Ubuntu Mono", "Courier New", monospace;
+  --bg-panel: #161d28;
+}
+
 :root,
 .theme-dark {
   --bg-primary: #0f141c;
   --bg-secondary: #161d28;
   --bg-tertiary: #1e2736;
   --bg-hover: #253042;
+  --bg-panel: #161d28;
   --border-color: #2b374b;
   --text-primary: #e6edf3;
   --text-secondary: #94a3b8;
@@ -149,7 +156,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  font-family: var(--font-sans);
   overflow: hidden;
   user-select: none;
 }
@@ -163,57 +170,69 @@ body {
   color: var(--text-primary);
 }
 
-/* Top Tabbar */
+/* Workspace Tabbar */
 .app-tabbar {
   display: flex;
-  align-items: center;
-  height: 40px;
+  align-items: flex-end;
+  height: 35px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
-  padding: 0 10px;
-  gap: 8px;
-}
-
-.brand-logo {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 700;
-  font-size: 14px;
-  color: var(--accent);
-  cursor: pointer;
-  padding-right: 10px;
-  border-right: 1px solid var(--border-color);
+  padding: 0 8px;
+  flex-shrink: 0;
 }
 
 .tabs-scroll-strip {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 4px;
   flex: 1;
   overflow-x: auto;
+  min-width: 0;
+  height: 100%;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.tabs-scroll-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .workspace-tab {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px;
-  font-size: 12.5px;
+  padding: 0 12px;
+  height: 29px;
+  font-size: 12px;
   border-radius: 6px 6px 0 0;
-  background: transparent;
+  background: var(--bg-secondary);
   color: var(--text-secondary);
   cursor: pointer;
   border: 1px solid transparent;
+  border-bottom: none;
   white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.workspace-tab:hover:not(.active) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 .workspace-tab.active {
   background: var(--bg-primary);
   color: var(--text-primary);
   border-color: var(--border-color);
-  border-bottom-color: var(--bg-primary);
+  border-bottom: 1px solid var(--bg-primary);
+  margin-bottom: -1px;
   font-weight: 600;
+}
+
+.tab-title {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tab-close-btn {
@@ -223,6 +242,13 @@ body {
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
+  border-radius: 3px;
+  padding: 1px 3px;
+}
+
+.tab-close-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
 }
 
 .new-tab-plus-btn {
@@ -231,19 +257,58 @@ body {
   color: var(--text-primary);
   width: 24px;
   height: 24px;
+  margin-bottom: 4px;
   border-radius: 4px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 .app-header-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 5px;
+  margin-right: 6px;
+  margin-bottom: 3px;
+  flex-shrink: 0;
+}
+
+.header-mini-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: all 0.12s;
+}
+
+.header-mini-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .shortcut-hint {
   font-size: 11.5px;
   color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 480px;
+}
+
+@media (max-width: 1200px) {
+  .shortcut-hint {
+    display: none;
+  }
 }
 
 .theme-toggle-btn {
@@ -275,11 +340,19 @@ body {
 .bc-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 6px;
+  padding: 4px 10px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+
+.bc-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .bc-toolbar-group {
@@ -456,9 +529,58 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  padding: 6px 12px;
+  padding: 4px 10px;
   background: var(--bg-primary);
   border-bottom: 1px solid var(--border-color);
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Bottom Status Bar */
+.app-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  user-select: none;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.statusbar-left,
+.statusbar-center,
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.statusbar-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.statusbar-exit-btn {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: all 0.12s;
+}
+
+.statusbar-exit-btn:hover {
+  background: rgba(245, 158, 11, 0.28);
 }
 
 .path-input-box {
@@ -496,7 +618,7 @@ body {
   border: none;
   color: var(--text-primary);
   font-size: 12px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   outline: none;
 }
 
@@ -549,7 +671,7 @@ body {
 .diff-pane {
   overflow-x: auto;
   position: relative;
-  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   outline: none;
 }
@@ -785,7 +907,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
@@ -893,9 +1015,27 @@ body {
 .folder-col-left,
 .folder-col-right {
   display: grid;
-  grid-template-columns: 1fr 80px 90px;
+  grid-template-columns: minmax(0, 1fr) 75px 135px;
   align-items: center;
   padding: 0 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.col-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.entry-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .folder-col-center {
@@ -924,13 +1064,24 @@ body {
 .entry-missing {
   color: var(--text-muted);
   font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.col-size,
+.col-size {
+  text-align: right;
+  padding-right: 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
 .col-time {
   text-align: right;
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-muted);
+  font-family: var(--font-mono);
 }
 
 /* 3-Way Merge View */
@@ -962,7 +1113,7 @@ body {
 .three-way-code-list {
   flex: 1;
   overflow: auto;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
@@ -1002,7 +1153,7 @@ body {
 .three-way-output-body {
   flex: 1;
   overflow: auto;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
@@ -1317,7 +1468,7 @@ body {
   color: var(--text-primary);
   border: none;
   padding: 12px 16px;
-  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
   resize: none;

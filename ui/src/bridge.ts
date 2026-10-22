@@ -74,6 +74,7 @@ export interface AppInfoDto {
 
 export interface UserPreferencesDto {
   theme: "dark" | "light";
+  language: "zh-CN" | "en-US";
   ignore_whitespace: boolean;
   ignore_case: boolean;
   text_row_filter: "all" | "diffs" | "equals";

@@ -7,6 +7,7 @@ import {
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
 import { ConflictResolution, ThreeWayDiffResult, ThreeWayRow } from "../types";
+import { t } from "../i18n";
 
 interface Merge3WayViewProps {
   sessionId: string;
@@ -17,6 +18,7 @@ interface Merge3WayViewProps {
   initialOutputPath?: string;
   titles?: [string | null, string | null, string | null, string | null];
   onCloseOrExit?: () => void;
+  onUpdateTabTitle?: (newTitle: string) => void;
 }
 
 export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
@@ -32,6 +34,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     "left" | "base" | "right" | null
   >(null);
   const [toast, setToast] = createSignal<string | null>(null);
+  let lastReportedTitle = "";
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -43,7 +46,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     const bp = (b ?? basePath()).trim();
     const rp = (r ?? rightPath()).trim();
     if (!lp || !bp || !rp) {
-      notify("请先指定 Left、Base、Right 三个文件路径");
+      notify(t("merge_3way.missing_paths"));
       return;
     }
     try {
@@ -57,7 +60,15 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
       if (loaded) {
         setSummary(loaded.summary);
         setRows(loaded.rows);
-        notify(`已加载三向合并: ${loaded.summary.hunks.length} 处变更块`);
+        const fileBase =
+          bp.split(/[/\\]/).pop() ||
+          lp.split(/[/\\]/).pop() ||
+          rp.split(/[/\\]/).pop();
+        if (fileBase && fileBase !== lastReportedTitle) {
+          lastReportedTitle = fileBase;
+          props.onUpdateTabTitle?.(`⑃ ${fileBase}`);
+        }
+        notify(t("merge_3way.loaded_hunks", { count: loaded.summary.hunks.length }));
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err));
@@ -103,7 +114,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
   const handleResolve = (hunkId: number, resolution: ConflictResolution) => {
     const next = resolveThreeWayHunk(props.sessionId, hunkId, resolution);
     setSummary(next);
-    notify(`已更新块 #${hunkId + 1} 合并策略 (${resolution})`);
+    notify(t("merge_3way.updated_hunk", { id: hunkId + 1, res: resolution }));
   };
 
   const handleSaveMergedOutput = async (closeAfterSave = false) => {
@@ -117,7 +128,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         });
         if (res?.saved) {
           await callRustRpc("set_process_exit_code", { code: 0 });
-          notify(`已保存合并结果到: ${target} (Exit Code: 0)`);
+          notify(t("merge_3way.saved_success", { path: target }));
           if (closeAfterSave) {
             await fetch("/api/shutdown", {
               method: "POST",
@@ -134,9 +145,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
     }
     try {
       await navigator.clipboard.writeText(content);
-      notify("已拷贝合并结果全文到剪贴板");
+      notify(t("merge_3way.copied_clipboard"));
     } catch {
-      notify("请指定输出文件路径后保存");
+      notify(t("merge_3way.specify_output"));
     }
   };
 
@@ -156,10 +167,10 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         <div class="bc-toolbar-group">
           <span class="merge-status-banner">
             {rows().length === 0
-              ? "请选择 Left / Base / Right 三个文件开始三向合并"
+              ? t("merge_3way.select_paths_notice")
               : summary().unresolved_conflicts > 0
-              ? `⚠️ 剩余 ${summary().unresolved_conflicts} 处冲突待解决`
-              : "✅ 所有冲突已解决，可安全保存输出"}
+              ? t("merge_3way.unresolved_notice", { count: summary().unresolved_conflicts })
+              : t("merge_3way.resolved_notice")}
           </span>
         </div>
 
@@ -170,7 +181,10 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
             {(hunk) => (
               <div class="hunk-resolve-pill">
                 <span class="hunk-badge">
-                  块 #{hunk.id + 1} ({hunk.status === "conflict" ? "冲突" : "自动"}):
+                  {t("merge_3way.hunk_label", {
+                    id: hunk.id + 1,
+                    status: hunk.status === "conflict" ? t("merge_3way.status_conflict") : t("merge_3way.status_auto"),
+                  })}
                 </span>
                 <button
                   class={`mini-resolve-btn ${
@@ -212,23 +226,30 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
         <div class="bc-stats-pills">
           <button
             class="bc-tool-btn"
+            onClick={() => handleLoadThreeWay()}
+            title={t("merge_3way.load_btn")}
+          >
+            {t("merge_3way.load_btn")}
+          </button>
+          <button
+            class="bc-tool-btn"
             onClick={() => handleSaveMergedOutput(false)}
           >
-            💾 保存输出
+            {t("merge_3way.save_merged")}
           </button>
           <button
             class="bc-tool-btn active"
             onClick={() => handleSaveMergedOutput(true)}
-            title="保存合并结果并以 Exit Code 0 退出 (Git Mergetool 成功)"
+            title="Exit 0"
           >
-            ✅ 完成合并退出 (Exit 0)
+            ✅ {t("common.ok")} (Exit 0)
           </button>
           <button
             class="bc-tool-btn"
             onClick={handleAbortMerge}
-            title="放弃合并并以 Exit Code 1 退出 (Git Mergetool 保留冲突)"
+            title="Exit 1"
           >
-            🚫 放弃合并 (Exit 1)
+            🚫 {t("common.cancel")} (Exit 1)
           </button>
         </div>
       </div>
@@ -242,12 +263,16 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           <span class="side-badge left">LEFT</span>
           <input
             class="path-text-input"
-            placeholder="Left (本地修改文件)..."
+            placeholder={t("merge_3way.pick_left")}
             value={leftPath()}
             onInput={(e) => setLeftPath(e.currentTarget.value)}
           />
-          <button class="browse-btn" onClick={() => setPickerTarget("left")}>
-            📂 浏览
+          <button
+            class="browse-btn"
+            title={t("common.browse")}
+            onClick={() => setPickerTarget("left")}
+          >
+            📂
           </button>
         </div>
 
@@ -255,12 +280,16 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           <span class="side-badge">BASE</span>
           <input
             class="path-text-input"
-            placeholder="Base (共同祖先文件)..."
+            placeholder={t("merge_3way.pick_base")}
             value={basePath()}
             onInput={(e) => setBasePath(e.currentTarget.value)}
           />
-          <button class="browse-btn" onClick={() => setPickerTarget("base")}>
-            📂 浏览
+          <button
+            class="browse-btn"
+            title={t("common.browse")}
+            onClick={() => setPickerTarget("base")}
+          >
+            📂
           </button>
         </div>
 
@@ -268,15 +297,16 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           <span class="side-badge right">RIGHT</span>
           <input
             class="path-text-input"
-            placeholder="Right (远端文件)..."
+            placeholder={t("merge_3way.pick_right")}
             value={rightPath()}
             onInput={(e) => setRightPath(e.currentTarget.value)}
           />
-          <button class="browse-btn" onClick={() => setPickerTarget("right")}>
-            📂 浏览
-          </button>
-          <button class="browse-btn" onClick={() => handleLoadThreeWay()}>
-            🔄 加载合并
+          <button
+            class="browse-btn"
+            title={t("common.browse")}
+            onClick={() => setPickerTarget("right")}
+          >
+            📂
           </button>
         </div>
       </div>
@@ -285,7 +315,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
       <div class="three-way-top-grid">
         <div class="three-way-col">
           <div class="three-way-col-header left">
-            {props.titles?.[0] ?? "LEFT (本地修改 / LOCAL)"}
+            {props.titles?.[0] ?? t("merge_3way.ours_default")}
           </div>
           <div class="three-way-code-list">
             <For each={rows()}>
@@ -301,7 +331,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
 
         <div class="three-way-col">
           <div class="three-way-col-header base">
-            {props.titles?.[2] ?? "BASE (共同祖先 / ANCESTOR)"}
+            {props.titles?.[2] ?? t("merge_3way.base_default")}
           </div>
           <div class="three-way-code-list">
             <For each={rows()}>
@@ -317,7 +347,7 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
 
         <div class="three-way-col">
           <div class="three-way-col-header right">
-            {props.titles?.[1] ?? "RIGHT (远端修改 / REMOTE)"}
+            {props.titles?.[1] ?? t("merge_3way.theirs_default")}
           </div>
           <div class="three-way-code-list">
             <For each={rows()}>
@@ -335,15 +365,15 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
       {/* Bottom 4th Pane: Merged Output */}
       <div class="three-way-output-pane">
         <div class="three-way-output-header">
-          <span>📝 MERGED OUTPUT (合并结果输出窗格)</span>
+          <span>{t("merge_3way.merged_output_header")}</span>
           <input
             class="path-text-input"
             style={{ "max-width": "380px", border: "1px solid var(--border-color)", padding: "2px 8px" }}
-            placeholder="可选: 输出保存文件路径 (默认覆盖 Base)"
+            placeholder={t("merge_3way.pick_output")}
             value={outputPath()}
             onInput={(e) => setOutputPath(e.currentTarget.value)}
           />
-          <span class="output-line-count">共 {summary().merged_lines.length} 行</span>
+          <span class="output-line-count">{t("merge_3way.line_count", { count: summary().merged_lines.length })}</span>
         </div>
         <div class="three-way-output-body">
           <For each={summary().merged_lines}>

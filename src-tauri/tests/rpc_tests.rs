@@ -123,6 +123,7 @@ fn test_bcompare_cli_folder_launch_and_rpc_flow() {
             "update_user_preferences",
             &json!({
                 "theme": "light",
+                "language": "en-US",
                 "ignore_whitespace": true,
                 "text_row_filter": "diffs",
                 "window_width": 1680,
@@ -137,6 +138,7 @@ fn test_bcompare_cli_folder_launch_and_rpc_flow() {
         )
         .unwrap();
     assert_eq!(updated_prefs["theme"], "light");
+    assert_eq!(updated_prefs["language"], "en-US");
     assert_eq!(updated_prefs["ignore_whitespace"], true);
     assert_eq!(updated_prefs["text_row_filter"], "diffs");
     assert_eq!(updated_prefs["window_width"], 1680);
@@ -305,4 +307,126 @@ fn test_get_app_info_returns_version_hash_and_binary_path() {
     assert_eq!(direct_info.name, "FreeCompare");
     assert_eq!(direct_info.version, res["version"].as_str().unwrap());
     assert_eq!(direct_info.git_hash, res["git_hash"].as_str().unwrap());
+}
+
+#[test]
+fn test_git_difftool_two_way_text_launch_and_rpc_lifecycle() {
+    let dir = tempdir().unwrap();
+    let head_blob = dir.path().join("git-blob-HEAD-App.tsx");
+    let worktree_file = dir.path().join("App.tsx");
+
+    fs::write(
+        &head_blob,
+        "import { Component } from 'solid-js';\nexport const App: Component = () => <div>v1</div>;\n",
+    )
+    .unwrap();
+    fs::write(
+        &worktree_file,
+        "import { Component } from 'solid-js';\nexport const App: Component = () => <div>v2-modified</div>;\n",
+    )
+    .unwrap();
+
+    // 1. Simulate exact Git difftool invocation:
+    // `fcompare -ro1 -title1="$LOCAL (HEAD)" -title2="$REMOTE (Working Tree)" "$LOCAL" "$REMOTE"`
+    let args = [
+        "-ro1",
+        "-title1=App.tsx (HEAD)",
+        "-title2=App.tsx (Working Tree)",
+        head_blob.to_str().unwrap(),
+        worktree_file.to_str().unwrap(),
+    ];
+    let inv = freecompare_core::CliInvocation::parse(args).unwrap();
+    let backend = AppBackend::new();
+    let launch = backend.configure_from_cli(&inv).unwrap();
+
+    assert_eq!(launch.kind, Some(SessionKind::TwoWayText));
+    assert_eq!(launch.readonly, [true, false, false]);
+    assert_eq!(
+        launch.titles[0].as_deref(),
+        Some("App.tsx (HEAD)")
+    );
+    assert_eq!(
+        launch.titles[1].as_deref(),
+        Some("App.tsx (Working Tree)")
+    );
+
+    // 2. UI onMount calls `get_startup_session`
+    let startup_val = backend.dispatch_rpc("get_startup_session", &json!({})).unwrap();
+    assert_eq!(startup_val["kind"], "two_way_text");
+    assert_eq!(startup_val["readonly"][0], true);
+    assert_eq!(startup_val["readonly"][1], false);
+    assert_eq!(startup_val["titles"][0], "App.tsx (HEAD)");
+    assert_eq!(startup_val["titles"][1], "App.tsx (Working Tree)");
+
+    // 3. UI loads the two files via `open_two_way_files`
+    let open_val = backend
+        .dispatch_rpc(
+            "open_two_way_files",
+            &json!({
+                "left_path": head_blob.to_string_lossy(),
+                "right_path": worktree_file.to_string_lossy(),
+                "options": {
+                    "ignore_whitespace": false,
+                    "ignore_case": false,
+                    "show_only_diffs": false,
+                    "context_lines": 3
+                },
+                "initial_row_count": 50
+            }),
+        )
+        .unwrap();
+
+    let sid = open_val["session_id"].as_str().unwrap();
+    let hunks = open_val["summary"]["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+
+    // 4. Merging from Right to Left (into the read-only HEAD blob) should be blocked by UI contract,
+    // while merging Left to Right should succeed and update working tree.
+    let merge_res = backend
+        .dispatch_rpc(
+            "merge_two_way_hunk",
+            &json!({
+                "session_id": sid,
+                "hunk_id": 0,
+                "direction": "left_to_right",
+                "viewport_start": 0,
+                "viewport_count": 50
+            }),
+        )
+        .unwrap();
+    assert_eq!(merge_res["summary"]["stats"]["modified_hunks"], 0);
+
+    // Save Right side (worktree)
+    backend
+        .dispatch_rpc(
+            "save_two_way_side",
+            &json!({
+                "session_id": sid,
+                "is_left": false
+            }),
+        )
+        .unwrap();
+
+    let updated_worktree = fs::read_to_string(&worktree_file).unwrap();
+    assert_eq!(
+        updated_worktree,
+        "import { Component } from 'solid-js';\nexport const App: Component = () => <div>v1</div>;\n"
+    );
+
+    // 5. Review Mode approve and reject exit codes contract
+    backend
+        .dispatch_rpc("set_process_exit_code", &json!({ "code": 0 }))
+        .unwrap();
+    assert_eq!(
+        backend.exit_code.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    backend
+        .dispatch_rpc("set_process_exit_code", &json!({ "code": 1 }))
+        .unwrap();
+    assert_eq!(
+        backend.exit_code.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }

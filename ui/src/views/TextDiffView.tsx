@@ -8,6 +8,7 @@ import {
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
 import { VirtualDiffViewport } from "../engine/VirtualDiffViewport";
+import { t } from "../i18n";
 import {
   DiffOptions,
   MergeDirection,
@@ -59,12 +60,13 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const [confirmExitDirty, setConfirmExitDirty] = createSignal<boolean>(true);
   const [recentLeftPaths, setRecentLeftPaths] = createSignal<string[]>([]);
   const [recentRightPaths, setRecentRightPaths] = createSignal<string[]>([]);
+  let lastReportedTitle = "";
 
   const tryCloseOrExit = () => {
     if (
       confirmExitDirty() &&
       (summary().left_dirty || summary().right_dirty) &&
-      !window.confirm("当前文件存在未保存的修改，确定要放弃修改并退出吗？")
+      !window.confirm(t("text_diff.dirty_confirm"))
     ) {
       return;
     }
@@ -189,11 +191,11 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
 
   const handleMergeHunk = (hunkId: number, direction: MergeDirection) => {
     if (direction === "left_to_right" && props.rightReadonly) {
-      showToast("🔒 右侧处于只读锁定模式 (-ro2)，禁止覆盖修改");
+      showToast(t("text_diff.readonly_no_merge_right"));
       return;
     }
     if (direction === "right_to_left" && props.leftReadonly) {
-      showToast("🔒 左侧处于只读锁定模式 (-ro1)，禁止覆盖修改");
+      showToast(t("text_diff.readonly_no_merge_left"));
       return;
     }
     const nextSummary = CompareBackendClient.mergeHunk(props.sessionId, hunkId, direction);
@@ -201,14 +203,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     setVersionTick((t) => t + 1);
     showToast(
       direction === "left_to_right"
-        ? `已将差异块 #${hunkId + 1} 复制到右侧`
-        : `已将差异块 #${hunkId + 1} 复制到左侧`
+        ? t("text_diff.hunk_copied_right", { id: hunkId + 1 })
+        : t("text_diff.hunk_copied_left", { id: hunkId + 1 })
     );
   };
 
   const handleEditLine = (isLeft: boolean, lineNo1Based: number, newText: string) => {
     if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
-      showToast("🔒 当前侧处于只读锁定模式 (-ro)，无法编辑");
+      showToast(t("text_diff.readonly_no_edit"));
       return;
     }
     const nextSummary = CompareBackendClient.editLine(
@@ -219,12 +221,17 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     );
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
-    showToast(`已更新${isLeft ? "左侧" : "右侧"}第 ${lineNo1Based} 行`);
+    showToast(
+      t("text_diff.line_updated", {
+        side: isLeft ? t("text_diff.side_left") : t("text_diff.side_right"),
+        line: lineNo1Based,
+      })
+    );
   };
 
   const handlePasteTextToSide = (isLeft: boolean, text: string) => {
     if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
-      showToast("🔒 当前侧处于只读锁定模式 (-ro)，无法粘贴覆盖");
+      showToast(t("text_diff.readonly_no_paste"));
       return;
     }
     setAllSelectedSide(null);
@@ -239,7 +246,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     const firstDiff = slice.rows.find((r) => r.status !== "equal") ?? slice.rows[0] ?? null;
     setSelectedRow(firstDiff);
     const lineCnt = isLeft ? nextSummary.left_line_count : nextSummary.right_line_count;
-    showToast(`已粘贴 ${lineCnt} 行文本到${isLeft ? "左侧" : "右侧"}`);
+    showToast(
+      t("text_diff.pasted_lines", {
+        count: lineCnt,
+        side: isLeft ? t("text_diff.side_left") : t("text_diff.side_right"),
+      })
+    );
   };
 
   const handleReadClipboardAndPaste = async (isLeft: boolean) => {
@@ -434,11 +446,40 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             initial.rows.find((row) => row.status !== "equal") ?? initial.rows[0];
           if (firstDiff) setSelectedRow(firstDiff);
         }
+        const lBase = l ? l.split(/[/\\]/).pop() || l : "";
+        const rBase = r ? r.split(/[/\\]/).pop() || r : "";
+        const shortTitle =
+          lBase === rBase
+            ? lBase
+            : lBase && rBase
+            ? `${lBase} ↔ ${rBase}`
+            : lBase || rBase;
+        if (shortTitle && shortTitle !== lastReportedTitle && !props.leftTitle && !props.rightTitle) {
+          lastReportedTitle = shortTitle;
+          props.onUpdateTabTitle?.(shortTitle);
+        }
         showToast(`已加载对比文件: ${l} ↔ ${r}`);
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const handleReload = async () => {
+    const l = leftPath().trim();
+    const r = rightPath().trim();
+    if (!l && !r) {
+      showToast(t("text_diff.no_file_to_reload"));
+      return;
+    }
+    if (
+      (summary().left_dirty || summary().right_dirty) &&
+      !window.confirm(t("text_diff.dirty_reload_confirm"))
+    ) {
+      return;
+    }
+    await handleLoadDiskPaths(l, r);
+    showToast(t("text_diff.reload_success"));
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -576,7 +617,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         const count =
           side === "left" ? summary().left_line_count : summary().right_line_count;
         showToast(
-          `已全选${side === "left" ? "左侧" : "右侧"}全部 ${count} 行 (按 Ctrl+C 即可拷贝全文)`
+          t("text_diff.all_selected_side", {
+            side: side === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+            count,
+          })
         );
         return;
       }
@@ -656,7 +700,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       return;
     }
 
-    // 4. Function keys (`F7` / `Shift+F7` BC Next/Prev diff) & single-key Vim/modern shortcuts
+    // 4. Function keys (`F5` Reload / `F7` / `Shift+F7` BC Next/Prev diff) & single-key Vim/modern shortcuts
+    if (e.key === "F5") {
+      e.preventDefault();
+      handleReload();
+      return;
+    }
     if (e.key === "F7") {
       e.preventDefault();
       jumpToHunk(e.shiftKey ? -1 : 1);
@@ -735,23 +784,23 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <button
             class={`bc-tool-btn ${rowFilter() === "all" ? "active" : ""}`}
             onClick={() => handleSetRowFilter("all")}
-            title="显示全部行"
+            title={t("text_diff.filter_all_tip")}
           >
-            ✱ 全部
+            {t("text_diff.filter_all")}
           </button>
           <button
             class={`bc-tool-btn ${rowFilter() === "diffs" ? "active" : ""}`}
             onClick={() => handleSetRowFilter("diffs")}
-            title="仅显示差异行"
+            title={t("text_diff.filter_diffs_tip")}
           >
-            ≠ 仅差异
+            {t("text_diff.filter_diffs")}
           </button>
           <button
             class={`bc-tool-btn ${rowFilter() === "equals" ? "active" : ""}`}
             onClick={() => handleSetRowFilter("equals")}
-            title="仅显示相同行"
+            title={t("text_diff.filter_equals_tip")}
           >
-            ＝ 仅相同
+            {t("text_diff.filter_equals")}
           </button>
         </div>
 
@@ -761,16 +810,16 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <button
             class={`bc-tool-btn ${options().ignore_whitespace ? "active" : ""}`}
             onClick={() => handleToggleOption("ignore_whitespace")}
-            title="忽略空白字符差异"
+            title={t("text_diff.ignore_whitespace_tip")}
           >
-            ␣ 忽略空白
+            {t("text_diff.ignore_whitespace")}
           </button>
           <button
             class={`bc-tool-btn ${options().ignore_case ? "active" : ""}`}
             onClick={() => handleToggleOption("ignore_case")}
-            title="忽略大小写差异"
+            title={t("text_diff.ignore_case_tip")}
           >
-            Aa 忽略大小写
+            {t("text_diff.ignore_case")}
           </button>
           <button
             class={`bc-tool-btn ${showWhitespaceGlyphs() ? "active" : ""}`}
@@ -781,9 +830,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                 show_whitespace_glyphs: next,
               }).catch(() => {});
             }}
-            title="显示可见空白符 (· 空格 / → Tab)"
+            title={t("text_diff.whitespace_glyphs_tip")}
           >
-            ¶ 可见空白
+            {t("text_diff.whitespace_glyphs")}
           </button>
           <button
             class={`bc-tool-btn ${showLineInspector() ? "active" : ""}`}
@@ -794,9 +843,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                 show_line_inspector: next,
               }).catch(() => {});
             }}
-            title="显示/隐藏底部单行详情放大镜面板"
+            title={t("text_diff.line_inspector_tip")}
           >
-            🔍 详情栏
+            {t("text_diff.line_inspector")}
           </button>
         </div>
 
@@ -807,40 +856,40 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             class="bc-tool-btn"
             onClick={() => jumpToHunk(-1)}
             disabled={summary().hunks.length === 0}
-            title="上一处差异 (Alt+Up)"
+            title={t("text_diff.prev_diff_tip")}
           >
-            ↑ 上一差异
+            {t("text_diff.prev_diff")}
           </button>
           <button
             class="bc-tool-btn"
             onClick={() => jumpToHunk(1)}
             disabled={summary().hunks.length === 0}
-            title="下一处差异 (Alt+Down)"
+            title={t("text_diff.next_diff_tip")}
           >
-            ↓ 下一差异
+            {t("text_diff.next_diff")}
           </button>
           <button
             class="bc-tool-btn accent-right"
             disabled={!currentHunk()}
             onClick={() => currentHunk() && handleMergeHunk(currentHunk()!.id, "left_to_right")}
-            title="将当前差异块复制到右侧 (Alt+Right)"
+            title={t("text_diff.copy_to_right_tip")}
           >
-            复制到右 »
+            {t("text_diff.copy_to_right")}
           </button>
           <button
             class="bc-tool-btn accent-left"
             disabled={!currentHunk()}
             onClick={() => currentHunk() && handleMergeHunk(currentHunk()!.id, "right_to_left")}
-            title="将当前差异块复制到左侧 (Alt+Left)"
+            title={t("text_diff.copy_to_left_tip")}
           >
-            « 复制到左
+            {t("text_diff.copy_to_left")}
           </button>
           <button
             class="bc-tool-btn"
             onClick={handleSwapSides}
-            title="交换左右两侧内容 (Swap Sides)"
+            title={t("text_diff.swap_sides_tip")}
           >
-            ⇄ 交换左右
+            {t("text_diff.swap_sides")}
           </button>
         </div>
 
@@ -850,16 +899,16 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <button
             class="bc-tool-btn"
             onClick={() => handleUndo(focusedSide() === "left")}
-            title="撤销 (Ctrl+Z)"
+            title={t("text_diff.undo_tip")}
           >
-            ↶ 撤销
+            {t("text_diff.undo")}
           </button>
           <button
             class="bc-tool-btn"
             onClick={() => handleRedo(focusedSide() === "left")}
-            title="重做 (Ctrl+Y)"
+            title={t("text_diff.redo_tip")}
           >
-            ↷ 重做
+            {t("text_diff.redo")}
           </button>
           <button
             class="bc-tool-btn"
@@ -870,22 +919,29 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               );
               setEditingFullSide(side);
             }}
-            title="自由编辑或粘贴大段多行文本"
+            title={t("text_diff.edit_text_tip")}
           >
-            ✏️ 编辑文本
+            {t("text_diff.edit_text")}
           </button>
           <button
             class="bc-tool-btn"
             onClick={() => handleSaveSide(focusedSide() === "left")}
-            title="保存当前焦点侧 (Ctrl+S)"
+            title={t("text_diff.save_tip")}
           >
-            💾 保存
+            {t("text_diff.save")}
+          </button>
+          <button
+            class="bc-tool-btn"
+            onClick={handleReload}
+            title={t("text_diff.reload_tip")}
+          >
+            {t("text_diff.reload")}
           </button>
         </div>
 
-        {/* Summary Badges & Changed File Navigation */}
-        <div class="bc-stats-pills">
-          <Show when={(props.siblingFiles?.length ?? 0) > 0}>
+        <Show when={(props.siblingFiles?.length ?? 0) > 0}>
+          <div class="bc-toolbar-divider" />
+          <div class="bc-toolbar-group">
             <button
               class={`bc-tool-btn ${showFilesSidebar() ? "active" : ""}`}
               onClick={() => {
@@ -895,39 +951,26 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                   show_files_sidebar: next,
                 }).catch(() => {});
               }}
-              title="展开/收起变更文件列表 (Ctrl+B 或 \)"
+              title="Ctrl+B"
             >
-              📂 文件 ({Math.max(1, currentSiblingIdx() + 1)}/{props.siblingFiles!.length})
+              {t("text_diff.files_nav")} ({Math.max(1, currentSiblingIdx() + 1)}/{props.siblingFiles!.length})
             </button>
             <button
               class="bc-tool-btn"
               onClick={() => switchToSiblingFile(currentSiblingIdx() - 1)}
-              title="上一个变更文件 ([ 或 Alt+PageUp 或 Ctrl+Alt+N)"
+              title={t("text_diff.prev_file_tip")}
             >
-              ⬅️ 上一文件 ([)
+              {t("text_diff.prev_file")}
             </button>
             <button
               class="bc-tool-btn"
               onClick={() => switchToSiblingFile(currentSiblingIdx() + 1)}
-              title="下一个变更文件 (] 或 Alt+PageDown 或 Ctrl+Alt+M)"
+              title={t("text_diff.next_file_tip")}
             >
-              ➡️ 下一文件 (])
+              {t("text_diff.next_file")}
             </button>
-          </Show>
-          <span class="stat-pill mod">修改块: {summary().stats.modified_hunks}</span>
-          <span class="stat-pill ins">新增块: {summary().stats.inserted_hunks}</span>
-          <span class="stat-pill del">删除块: {summary().stats.deleted_hunks}</span>
-          <span class="stat-pill eq">相同行: {summary().stats.equal_lines}</span>
-          <Show when={!isReviewMode()}>
-            <button
-              class="bc-tool-btn"
-              onClick={tryCloseOrExit}
-              title="Beyond Compare 风格 Esc 退出当前对比，自动进入 Git 队列下一个文件或返回目录列表 (Esc / q / Ctrl+W)"
-            >
-              ⏭️ 下个文件/退出 (Esc)
-            </button>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </div>
 
       {/* Dual Path / Clipboard Action Header */}
@@ -940,12 +983,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             {props.leftTitle ? `LEFT: ${props.leftTitle}` : "LEFT"}
           </span>
           <Show when={props.leftReadonly}>
-            <span class="meta-tag" title="只读锁定 (-ro1)">🔒 只读</span>
+            <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
           </Show>
           <input
             class="path-text-input"
             list={`mru-left-${props.sessionId}`}
-            placeholder="输入左侧文件路径回车，或直接在下方 Ctrl+V 粘贴文本..."
+            placeholder={t("text_diff.path_left_placeholder")}
             value={leftPath()}
             onInput={(e) => setLeftPath(e.currentTarget.value)}
             onKeyDown={(e) =>
@@ -962,29 +1005,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             <For each={recentLeftPaths()}>{(p) => <option value={p} />}</For>
           </datalist>
           <Show when={summary().left_dirty}>
-            <span class="dirty-dot" title="左侧有未保存修改">●</span>
+            <span class="dirty-dot" title={t("text_diff.dirty_dot_tip")}>●</span>
           </Show>
-          <span class="meta-tag">{summary().left_line_count} 行</span>
           <button
             class="browse-btn"
-            disabled={props.leftReadonly}
-            title="从剪贴板粘贴文本到左侧 (Ctrl+V)"
-            onClick={() => handleReadClipboardAndPaste(true)}
-          >
-            📋 粘贴
-          </button>
-          <button
-            class="browse-btn"
-            title="拷贝左侧全文到剪贴板 (Ctrl+C)"
-            onClick={() => handleCopySideToClipboard(true)}
-          >
-            📄 拷贝
-          </button>
-          <button
-            class="browse-btn"
+            title={t("text_diff.browse_btn")}
             onClick={() => setBrowserTargetSide("left")}
           >
-            📂 浏览...
+            📂
           </button>
         </div>
 
@@ -996,12 +1024,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             {props.rightTitle ? `RIGHT: ${props.rightTitle}` : "RIGHT"}
           </span>
           <Show when={props.rightReadonly}>
-            <span class="meta-tag" title="只读锁定 (-ro2)">🔒 只读</span>
+            <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
           </Show>
           <input
             class="path-text-input"
             list={`mru-right-${props.sessionId}`}
-            placeholder="输入右侧文件路径回车，或直接在下方 Ctrl+V 粘贴文本..."
+            placeholder={t("text_diff.path_right_placeholder")}
             value={rightPath()}
             onInput={(e) => setRightPath(e.currentTarget.value)}
             onKeyDown={(e) =>
@@ -1018,29 +1046,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             <For each={recentRightPaths()}>{(p) => <option value={p} />}</For>
           </datalist>
           <Show when={summary().right_dirty}>
-            <span class="dirty-dot" title="右侧有未保存修改">●</span>
+            <span class="dirty-dot" title={t("text_diff.dirty_dot_tip")}>●</span>
           </Show>
-          <span class="meta-tag">{summary().right_line_count} 行</span>
           <button
             class="browse-btn"
-            disabled={props.rightReadonly}
-            title="从剪贴板粘贴文本到右侧 (Ctrl+V)"
-            onClick={() => handleReadClipboardAndPaste(false)}
-          >
-            📋 粘贴
-          </button>
-          <button
-            class="browse-btn"
-            title="拷贝右侧全文到剪贴板 (Ctrl+C)"
-            onClick={() => handleCopySideToClipboard(false)}
-          >
-            📄 拷贝
-          </button>
-          <button
-            class="browse-btn"
+            title={t("text_diff.browse_btn")}
             onClick={() => setBrowserTargetSide("right")}
           >
-            📂 浏览...
+            📂
           </button>
         </div>
       </div>
@@ -1070,8 +1083,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                 "align-items": "center",
               }}
             >
-              <span>📂 变更文件 ({props.siblingFiles!.length})</span>
-              <span style={{ "font-size": "11px", opacity: "0.7" }}>[ / ] 切换</span>
+              <span>{t("text_diff.changed_files")} ({props.siblingFiles!.length})</span>
+              <span style={{ "font-size": "11px", opacity: "0.7" }}>{t("text_diff.switch_hint")}</span>
             </div>
             <div style={{ flex: "1", "overflow-y": "auto", padding: "4px 0" }}>
               <For each={props.siblingFiles}>
@@ -1159,25 +1172,28 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         <div class="bottom-line-inspector">
           <div class="inspector-header">
             <span>
-              🔍 当前行详情对比 (点击左/右窗格可直接 Ctrl+V 粘贴全文、Ctrl+A 全选单侧、Ctrl+C 拷贝全文、双击行直接修改)
+              {t("text_diff.inspector_header")}
             </span>
             <Show when={selectedRow()}>
               {(row) => (
                 <span class="inspector-coords">
-                  焦点侧: {focusedSide() === "left" ? "左 (LEFT)" : "右 (RIGHT)"} | 虚拟行 #
-                  {row().virtual_idx + 1} | 左行号: {row().left_line_no ?? "Gap"} | 右行号:{" "}
-                  {row().right_line_no ?? "Gap"}
+                  {t("text_diff.inspector_coords", {
+                    side: focusedSide() === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+                    virtual: row().virtual_idx + 1,
+                    left: row().left_line_no ?? "Gap",
+                    right: row().right_line_no ?? "Gap",
+                  })}
                 </span>
               )}
             </Show>
           </div>
           <div class="inspector-rows">
             <div class="inspector-line left-detail">
-              <span class="inspector-side-label">左 (L)</span>
+              <span class="inspector-side-label">{t("text_diff.side_left")}</span>
               <code class="inspector-code">
                 <Show
                   when={selectedRow()?.left_inline?.length}
-                  fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
+                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
                 >
                   <For each={selectedRow()!.left_inline}>
                     {(seg) => (
@@ -1190,11 +1206,11 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               </code>
             </div>
             <div class="inspector-line right-detail">
-              <span class="inspector-side-label">右 (R)</span>
+              <span class="inspector-side-label">{t("text_diff.side_right")}</span>
               <code class="inspector-code">
                 <Show
                   when={selectedRow()?.right_inline?.length}
-                  fallback={<span class="empty-placeholder">(空行 / 未选择)</span>}
+                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
                 >
                   <For each={selectedRow()!.right_inline}>
                     {(seg) => (
@@ -1210,12 +1226,59 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         </div>
       </Show>
 
+      {/* Bottom Status Bar: Diff Statistics, Active Cursor Coords, Exit */}
+      <footer class="app-statusbar">
+        <div class="statusbar-left">
+          <Show when={selectedRow()}>
+            {(row) => (
+              <span class="statusbar-item">
+                {t("text_diff.inspector_coords", {
+                  side: focusedSide() === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+                  virtual: row().virtual_idx + 1,
+                  left: row().left_line_no ?? "—",
+                  right: row().right_line_no ?? "—",
+                })}
+              </span>
+            )}
+          </Show>
+          <Show when={!selectedRow()}>
+            <span class="statusbar-item">
+              {t("text_diff.side_left")}: {summary().left_line_count} {t("text_diff.line_count", { count: "" }).trim()} | {t("text_diff.side_right")}: {summary().right_line_count} {t("text_diff.line_count", { count: "" }).trim()}
+            </span>
+          </Show>
+        </div>
+
+        <div class="statusbar-center">
+          <span class="stat-pill mod">{t("text_diff.stat_mod", { count: summary().stats.modified_hunks })}</span>
+          <span class="stat-pill ins">{t("text_diff.stat_ins", { count: summary().stats.inserted_hunks })}</span>
+          <span class="stat-pill del">{t("text_diff.stat_del", { count: summary().stats.deleted_hunks })}</span>
+          <span class="stat-pill eq">{t("text_diff.stat_eq", { count: summary().stats.equal_lines })}</span>
+        </div>
+
+        <div class="statusbar-right">
+          <Show when={(props.siblingFiles?.length ?? 0) > 0}>
+            <span class="statusbar-item">
+              📂 {Math.max(1, currentSiblingIdx() + 1)} / {props.siblingFiles!.length}
+            </span>
+          </Show>
+          <Show when={!isReviewMode()}>
+            <button
+              class="statusbar-exit-btn"
+              onClick={tryCloseOrExit}
+              title={t("text_diff.exit_btn_tip")}
+            >
+              {t("text_diff.exit_btn")}
+            </button>
+          </Show>
+        </div>
+      </footer>
+
       {/* Native Disk File Browser Modal */}
       <Show when={browserTargetSide()}>
         {(side) => (
           <FileBrowserModal
             mode="file"
-            title={side() === "left" ? "选择左侧对比文件" : "选择右侧对比文件"}
+            title={side() === "left" ? t("text_diff.browse_title_left") : t("text_diff.browse_title_right")}
             initialPath={side() === "left" ? leftPath() : rightPath()}
             onClose={() => setBrowserTargetSide(null)}
             onSelect={(selectedPath) => {
@@ -1234,7 +1297,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             <div class="file-browser-dialog" onClick={(e) => e.stopPropagation()}>
               <div class="modal-header">
                 <strong>
-                  ✏️ 自由编辑/输入{side() === "left" ? "左侧 (LEFT)" : "右侧 (RIGHT)"}文本
+                  {t("text_diff.modal_edit_title", {
+                    side: side() === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+                  })}
                 </strong>
                 <button
                   class="modal-close-btn"
@@ -1245,21 +1310,23 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               </div>
               <textarea
                 class="full-text-editor-area"
-                placeholder="在此直接输入或粘贴多行文本..."
+                placeholder={t("text_diff.modal_edit_placeholder")}
                 value={fullEditDraft()}
                 onInput={(e) => setFullEditDraft(e.currentTarget.value)}
                 autofocus
               />
               <div class="modal-footer">
                 <span class="modal-selection-hint">
-                  共 {fullEditDraft() ? fullEditDraft().split("\n").length : 0} 行
+                  {t("text_diff.modal_edit_lines", {
+                    count: fullEditDraft() ? fullEditDraft().split("\n").length : 0,
+                  })}
                 </span>
                 <div class="modal-footer-btns">
                   <button
                     class="bc-tool-btn"
                     onClick={() => setEditingFullSide(null)}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                   <button
                     class="bc-tool-btn active"
@@ -1269,7 +1336,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                       handlePasteTextToSide(isLeft, fullEditDraft());
                     }}
                   >
-                    应用并对比
+                    {t("text_diff.modal_apply")}
                   </button>
                 </div>
               </div>

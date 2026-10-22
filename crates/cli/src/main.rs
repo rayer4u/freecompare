@@ -164,10 +164,10 @@ fn main() -> Result<()> {
             loop {
                 std::thread::sleep(Duration::from_millis(500));
                 if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(400));
+                    std::thread::sleep(Duration::from_millis(1800));
                     if now_ms()
                         .saturating_sub(tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst))
-                        >= 350
+                        >= 1700
                     {
                         std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
                     } else {

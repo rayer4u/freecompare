@@ -1,5 +1,6 @@
 import { Component, createSignal, onMount, Show } from "solid-js";
 import { AppInfoDto, callRustRpc } from "../bridge";
+import { t } from "../i18n";
 
 interface AboutModalProps {
   onClose: () => void;
@@ -24,9 +25,9 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
   const copyText = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      showToast(`已复制 ${label}`);
+      showToast(`${t("common.copied")} ${label}`);
     } catch {
-      showToast("复制失败，请手动选中复制");
+      showToast(t("common.copy_failed"));
     }
   };
 
@@ -41,7 +42,7 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
       `Target Triple: ${info.target_triple}`,
       `Build Profile: ${info.build_profile}`,
     ].join("\n");
-    await copyText(text, "全部诊断信息");
+    await copyText(text, t("about.copied_all"));
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -66,7 +67,7 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
         <div class="modal-header">
           <div class="about-header-title">
             <span class="about-header-icon">⚡</span>
-            <strong>关于 FreeCompare</strong>
+            <strong>{t("about.modal_title")}</strong>
             <Show when={appInfo()}>
               {(info) => (
                 <span class="about-version-badge">v{info().version}</span>
@@ -76,7 +77,7 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
           <button
             class="modal-close-btn"
             onClick={props.onClose}
-            title="关闭 (Esc)"
+            title={t("about.close")}
           >
             ×
           </button>
@@ -85,55 +86,55 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
         <div class="about-modal-body">
           <div class="about-hero-section">
             <div class="about-hero-icon">⚡</div>
-            <div class="about-hero-title">FreeCompare Desktop</div>
+            <div class="about-hero-title">{t("about.app_title")}</div>
             <div class="about-hero-subtitle">
-              跨平台原生高保真代码审查、差异对比与三方合并工具
+              {t("about.subtitle")}
             </div>
           </div>
 
           <Show
             when={appInfo()}
-            fallback={<div class="about-loading">正在读取版本信息...</div>}
+            fallback={<div class="about-loading">{t("about.loading")}</div>}
           >
             {(info) => (
               <div class="about-info-table">
                 <div class="about-info-row">
-                  <span class="about-label">应用版本</span>
+                  <span class="about-label">{t("about.version")}</span>
                   <div class="about-val-group">
                     <span class="about-val-text font-bold">
                       v{info().version}
                     </span>
                     <span class="about-tag">
                       {info().build_profile === "release"
-                        ? "正式版 Release"
-                        : "调试版 Debug"}
+                        ? t("about.release")
+                        : t("about.debug")}
                     </span>
                   </div>
                 </div>
 
                 <div class="about-info-row">
-                  <span class="about-label">Git 提交 Hash</span>
+                  <span class="about-label">{t("about.git_hash")}</span>
                   <div class="about-val-group">
                     <code class="about-code-block" title={info().git_hash}>
                       {info().git_hash_short}
                     </code>
                     <button
                       class="about-copy-btn"
-                      onClick={() => copyText(info().git_hash, "Git Commit Hash")}
-                      title="复制完整 Git Commit Hash"
+                      onClick={() => copyText(info().git_hash, t("about.copied_hash"))}
+                      title={t("about.copy_hash")}
                     >
-                      📋 复制 Hash
+                      {t("about.copy_hash")}
                     </button>
                     <Show when={info().git_dirty}>
-                      <span class="about-dirty-tag" title="本地工作区有未提交改动">
-                        dirty
+                      <span class="about-dirty-tag" title={t("about.dirty_title")}>
+                        {t("about.dirty_badge")}
                       </span>
                     </Show>
                   </div>
                 </div>
 
                 <div class="about-info-row full-width">
-                  <span class="about-label">完整 Commit Hash</span>
+                  <span class="about-label">{t("about.full_commit")}</span>
                   <div class="about-val-group">
                     <code class="about-code-block select-all">
                       {info().git_hash}
@@ -143,7 +144,7 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
 
                 <div class="about-info-row full-width">
                   <span class="about-label">
-                    🎯 正在运行的二进制程序 (Binary Path)
+                    {t("about.binary_path")}
                   </span>
                   <div class="about-val-group">
                     <code
@@ -155,17 +156,17 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
                     <button
                       class="about-copy-btn"
                       onClick={() =>
-                        copyText(info().binary_path, "可执行文件路径")
+                        copyText(info().binary_path, t("about.copied_path"))
                       }
-                      title="复制二进制文件完整路径"
+                      title={t("about.copy_path")}
                     >
-                      📋 复制路径
+                      {t("about.copy_path")}
                     </button>
                   </div>
                 </div>
 
                 <div class="about-info-row">
-                  <span class="about-label">目标平台架构</span>
+                  <span class="about-label">{t("about.target_arch")}</span>
                   <div class="about-val-group">
                     <span class="about-val-text font-mono">
                       {info().target_triple}
@@ -186,12 +187,12 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
             class="modal-select-btn"
             style={{ background: "var(--bg-panel)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
             onClick={copyAllInfo}
-            title="复制全部环境与版本信息到剪贴板，方便诊断排错"
+            title={t("about.copy_all_tooltip")}
           >
-            📋 复制全部信息
+            {t("about.copy_all")}
           </button>
           <button class="modal-select-btn" onClick={props.onClose}>
-            关闭 (Esc)
+            {t("about.close")}
           </button>
         </div>
       </div>

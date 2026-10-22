@@ -1,4 +1,5 @@
-import { Component, createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import { createStore } from "solid-js/store";
 import { callRustRpc, StartupLaunchSessionDto, UserPreferencesDto } from "./bridge";
 import { SessionTabKind, WorkspaceTab } from "./types";
 import { HomeView } from "./views/HomeView";
@@ -7,17 +8,19 @@ import { FolderDiffView } from "./views/FolderDiffView";
 import { Merge3WayView } from "./views/Merge3WayView";
 import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
+import { currentLocale, setLocale, toggleLocale, t } from "./i18n";
 
 export const App: Component = () => {
   const [theme, setTheme] = createSignal<"dark" | "light">("dark");
   const [showSettings, setShowSettings] = createSignal(false);
   const [showAbout, setShowAbout] = createSignal(false);
   // Start cleanly on the Home tab without any pre-populated fake demo tabs!
-  const [tabs, setTabs] = createSignal<WorkspaceTab[]>([
+  const [tabs, setTabs] = createStore<WorkspaceTab[]>([
     { id: "tab-home", title: "🏠 新建会话", kind: "home" },
   ]);
 
   const [activeTabId, setActiveTabId] = createSignal<string>("tab-home");
+  const activeTab = () => tabs.find((t) => t.id === activeTabId()) ?? tabs[0];
   let tabCounter = 1;
 
   const launchSession = (
@@ -37,17 +40,25 @@ export const App: Component = () => {
         : kind === "three_way"
         ? "⑃ "
         : "🏠 ";
+    const fullTitle = title.startsWith(prefix) ? title : prefix + title;
     const nextTab: WorkspaceTab = {
       id,
-      title: prefix + title,
+      title: fullTitle,
       kind,
       leftPath,
       rightPath,
       basePath,
       ...extra,
     };
-    setTabs((prev) => [...prev, nextTab]);
+    setTabs([...tabs, nextTab]);
     setActiveTabId(id);
+  };
+
+  const updateTabTitle = (tabId: string, newTitle: string) => {
+    const idx = tabs.findIndex((t) => t.id === tabId);
+    if (idx !== -1 && tabs[idx].title !== newTitle) {
+      setTabs(idx, "title", newTitle);
+    }
   };
 
   const collectWindowGeometry = (immediate = false) => {
@@ -117,6 +128,9 @@ export const App: Component = () => {
     const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
     if (prefs?.theme === "light" || prefs?.theme === "dark") {
       setTheme(prefs.theme);
+    }
+    if (prefs?.language === "zh-CN" || prefs?.language === "en-US") {
+      setLocale(prefs.language, false);
     }
     if (prefs && !prefs.window_maximized) {
       try {
@@ -209,10 +223,10 @@ export const App: Component = () => {
 
   const closeTab = (id: string, e: MouseEvent) => {
     e.stopPropagation();
-    const list = tabs();
-    if (list.length <= 1) return;
-    const idx = list.findIndex((t) => t.id === id);
-    const filtered = list.filter((t) => t.id !== id);
+    if (tabs.length <= 1) return;
+    const idx = tabs.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+    const filtered = tabs.filter((t) => t.id !== id);
     setTabs(filtered);
     if (activeTabId() === id) {
       const nextActive = filtered[Math.max(0, idx - 1)];
@@ -227,11 +241,10 @@ export const App: Component = () => {
    */
   const handleCloseOrExitActiveSession = async () => {
     const current = activeTab();
-    const allTabs = tabs();
     // If there is a parent Folder Compare tab and we are inside a Two-Way file tab opened from it, pop back to Folder tab
-    const folderTab = allTabs.find((t) => t.kind === "folder");
-    if (current.kind === "two_way" && folderTab && allTabs.length > 2) {
-      const filtered = allTabs.filter((t) => t.id !== current.id);
+    const folderTab = tabs.find((t) => t.kind === "folder");
+    if (current.kind === "two_way" && folderTab && tabs.length > 2) {
+      const filtered = tabs.filter((t) => t.id !== current.id);
       setTabs(filtered);
       setActiveTabId(folderTab.id);
       return;
@@ -263,33 +276,59 @@ export const App: Component = () => {
     window.close();
   };
 
-  const activeTab = () => tabs().find((t) => t.id === activeTabId()) ?? tabs()[0];
+  const isReviewActive = createMemo(() => {
+    const tab = activeTab();
+    if (!tab) return false;
+    if (tab.reviewMode) return true;
+    const t0 = tab.titles?.[0] ?? "";
+    const t1 = tab.titles?.[1] ?? "";
+    const title = tab.title ?? "";
+    const lp = tab.leftPath ?? "";
+    const rp = tab.rightPath ?? "";
+    return (
+      title.includes("AI 拟修改") ||
+      title.includes("Proposed") ||
+      title.includes("当前文件") ||
+      t0.includes("当前文件") ||
+      t1.includes("AI 拟修改") ||
+      lp.includes("fcompare-guard") ||
+      rp.includes("fcompare-guard") ||
+      lp.includes("CURRENT_") ||
+      rp.includes("PROPOSED_")
+    );
+  });
+
+  const activeTabDisplayTitle = createMemo(() => {
+    const tab = activeTab();
+    if (!tab) return "";
+    return tab.id === "tab-home" ? t("header.new_session") : tab.title;
+  });
+
+  createEffect(() => {
+    const cur = activeTabDisplayTitle();
+    document.title = cur ? `${cur} — FreeCompare` : "FreeCompare";
+  });
 
   return (
     <div class={`app-root theme-${theme()}`}>
+      {/* Unified Top Tabbar: No redundant brand-logo, no extra stacked bar */}
       <header class="app-tabbar">
-        <div
-          class="brand-logo"
-          onClick={() => setActiveTabId("tab-home")}
-          title="返回新建会话主页"
-        >
-          <span class="brand-icon">⚡</span>
-          <span class="brand-text">FreeCompare</span>
-        </div>
-
         <div class="tabs-scroll-strip">
-          <For each={tabs()}>
+          <For each={tabs}>
             {(tab) => (
               <div
                 class={`workspace-tab ${activeTabId() === tab.id ? "active" : ""}`}
                 onClick={() => setActiveTabId(tab.id)}
+                title={tab.id === "tab-home" ? t("header.new_session") : tab.title}
               >
-                <span class="tab-title">{tab.title}</span>
+                <span class="tab-title">
+                  {tab.id === "tab-home" ? `🏠 ${t("header.new_session")}` : tab.title}
+                </span>
                 {tab.id !== "tab-home" && (
                   <button
                     class="tab-close-btn"
                     onClick={(e) => closeTab(tab.id, e)}
-                    title="关闭标签页"
+                    title={t("header.close_tab")}
                   >
                     ×
                   </button>
@@ -299,89 +338,71 @@ export const App: Component = () => {
           </For>
           <button
             class="new-tab-plus-btn"
-            onClick={() => launchSession("two_way", `文本比较 #${tabCounter}`)}
-            title="新建空白文本比较标签页"
+            onClick={() => launchSession("two_way", t("header.new_tab_title", { id: tabCounter }))}
+            title={t("header.new_tab_tooltip")}
           >
             +
           </button>
         </div>
 
         <div class="app-header-right">
-          <Show
-            when={(() => {
-              const tab = activeTab();
-              if (!tab) return false;
-              if (tab.reviewMode) return true;
-              const t0 = tab.titles?.[0] ?? "";
-              const t1 = tab.titles?.[1] ?? "";
-              const title = tab.title ?? "";
-              const lp = tab.leftPath ?? "";
-              const rp = tab.rightPath ?? "";
-              return (
-                title.includes("AI 拟修改") ||
-                title.includes("Proposed") ||
-                title.includes("当前文件") ||
-                t0.includes("当前文件") ||
-                t1.includes("AI 拟修改") ||
-                lp.includes("fcompare-guard") ||
-                rp.includes("fcompare-guard") ||
-                lp.includes("CURRENT_") ||
-                rp.includes("PROPOSED_")
-              );
-            })()}
-          >
+          <Show when={isReviewActive()}>
             <div class="header-review-group">
-              <span class="header-review-tag">🛡️ 审查模式</span>
+              <span class="header-review-tag">{t("header.review_mode")}</span>
               <button
                 class="header-review-btn approve"
                 onClick={handleApproveActiveSession}
-                title="通过本次代码审查并允许写入磁盘 (Esc / Exit Code: 0)"
+                title={t("header.approve_tooltip")}
               >
-                ✅ 通过审查 (Esc)
+                {t("header.approve")}
               </button>
               <button
                 class="header-review-btn reject"
                 onClick={handleRejectActiveSession}
-                title="拒绝本次代码修改并拦截 AI 写入 (Shift+Esc / Exit Code: 1)"
+                title={t("header.reject_tooltip")}
               >
-                ❌ 拒绝修改 (Shift+Esc)
+                {t("header.reject")}
               </button>
             </div>
-            <div class="header-divider" />
           </Show>
 
-          <span class="shortcut-hint">
-            Esc 下个文件/退回 · Alt+↑/↓ (或 n/p) 跳差异 · [/] 切上/下文件 · Ctrl+B 文件列表 · Ctrl+, 设置
-          </span>
           <button
-            class="theme-toggle-btn"
-            onClick={() => setShowAbout(true)}
-            title="关于 FreeCompare (查看版本、Git Commit 与运行程序路径)"
+            class="header-mini-btn"
+            onClick={toggleLocale}
+            title={t("header.lang_tooltip")}
           >
-            ℹ️ 关于
+            {currentLocale() === "zh-CN" ? "中" : "EN"}
           </button>
           <button
-            class="theme-toggle-btn"
-            onClick={() => setShowSettings(true)}
-            title="偏好设置 (Ctrl+,)"
-          >
-            ⚙️ 设置
-          </button>
-          <button
-            class="theme-toggle-btn"
+            class="header-mini-btn"
             onClick={() => {
               const next = theme() === "dark" ? "light" : "dark";
               setTheme(next);
               callRustRpc("update_user_preferences", { theme: next }).catch(() => {});
             }}
+            title={theme() === "dark" ? t("header.theme_dark") : t("header.theme_light")}
           >
-            {theme() === "dark" ? "☀️ 浅色主题" : "🌙 深色主题"}
+            {theme() === "dark" ? "🌙" : "☀️"}
+          </button>
+          <button
+            class="header-mini-btn"
+            onClick={() => setShowSettings(true)}
+            title={t("header.settings_tooltip")}
+          >
+            ⚙️
+          </button>
+          <button
+            class="header-mini-btn"
+            onClick={() => setShowAbout(true)}
+            title={t("header.about_tooltip")}
+          >
+            ℹ️
           </button>
         </div>
       </header>
 
       <main class="app-main-stage">
-        <For each={tabs()}>
+        <For each={tabs}>
           {(tab) => (
             <div
               class="tab-content-wrapper"
@@ -410,11 +431,8 @@ export const App: Component = () => {
                   reviewMode={tab.reviewMode}
                   onCloseOrExit={handleCloseOrExitActiveSession}
                   onUpdateTabTitle={(newTitle) => {
-                    setTabs((prev) =>
-                      prev.map((t) =>
-                        t.id === tab.id ? { ...t, title: "⇄ " + newTitle } : t
-                      )
-                    );
+                    const full = newTitle.startsWith("⇄ ") ? newTitle : "⇄ " + newTitle;
+                    updateTabTitle(tab.id, full);
                   }}
                 />
               </Show>
@@ -443,6 +461,10 @@ export const App: Component = () => {
                       rightFullPath
                     )
                   }
+                  onUpdateTabTitle={(newTitle) => {
+                    const full = newTitle.startsWith("📁 ") ? newTitle : "📁 " + newTitle;
+                    updateTabTitle(tab.id, full);
+                  }}
                 />
               </Show>
               <Show when={tab.kind === "three_way"}>
@@ -455,6 +477,10 @@ export const App: Component = () => {
                   initialOutputPath={tab.outputPath}
                   titles={tab.titles}
                   onCloseOrExit={handleCloseOrExitActiveSession}
+                  onUpdateTabTitle={(newTitle) => {
+                    const full = newTitle.startsWith("⑃ ") ? newTitle : "⑃ " + newTitle;
+                    updateTabTitle(tab.id, full);
+                  }}
                 />
               </Show>
             </div>

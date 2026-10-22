@@ -1,5 +1,6 @@
 import { Component, createSignal, For, onMount, Show } from "solid-js";
 import { AppInfoDto, callRustRpc, UserPreferencesDto } from "../bridge";
+import { currentLocale, setLocale, t } from "../i18n";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -47,7 +48,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
       .map((s) => s.trim())
       .filter(Boolean);
     await updateField("folder_exclude_globs", parsed);
-    notify("已保存文件夹排除规则");
+    notify(t("settings.globs_saved"));
   };
 
   const handleInstallGit = async () => {
@@ -55,29 +56,29 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
       "install_git_integration"
     );
     if (res?.success) {
-      notify(`✅ 已成功配置 Git (${res.scope}) 默认 difftool & mergetool`);
+      notify(t("settings.git_success", { scope: res.scope }));
     } else {
-      notify("配置 Git 失败，请检查终端权限");
+      notify(t("settings.git_fail"));
     }
   };
 
   const handleClearHistory = async () => {
-    if (!window.confirm("确定要清空最近打开文件与路径补全历史吗？")) return;
+    if (!window.confirm(t("settings.clear_history_confirm"))) return;
     await callRustRpc("clear_recent_sessions");
     await updateField("recent_left_paths", []);
     await updateField("recent_right_paths", []);
     await updateField("recent_folder_paths", []);
-    notify("已清空所有最近历史与路径补全记录");
+    notify(t("settings.clear_history_done"));
   };
 
   const handleResetDefaults = async () => {
-    if (!window.confirm("确定要恢复全部设置为出厂默认值吗？")) return;
+    if (!window.confirm(t("settings.reset_confirm"))) return;
     const res = await callRustRpc<UserPreferencesDto>("reset_user_preferences");
     if (res) {
       setPrefs(res);
       setGlobsInput((res.folder_exclude_globs || []).join(", "));
       props.onPreferencesUpdated(res);
-      notify("已恢复全部默认设置");
+      notify(t("settings.reset_done"));
     }
   };
 
@@ -85,12 +86,12 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     <div class="modal-backdrop" onClick={props.onClose}>
       <div
         class="file-browser-dialog"
-        style={{ "max-width": "680px", "max-height": "85vh", display: "flex", "flex-direction": "column" }}
+        style={{ "max-width": "700px", "max-height": "85vh", display: "flex", "flex-direction": "column" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div class="modal-header">
-          <strong>⚙️ FreeCompare 偏好设置 (Settings)</strong>
-          <button class="modal-close-btn" onClick={props.onClose}>
+          <strong>{t("settings.modal_title")}</strong>
+          <button class="modal-close-btn" onClick={props.onClose} title={t("common.close")}>
             ×
           </button>
         </div>
@@ -99,7 +100,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
           {/* Left Navigation Menu */}
           <div
             style={{
-              width: "150px",
+              width: "160px",
               "border-right": "1px solid var(--border-color)",
               background: "var(--bg-panel)",
               padding: "8px 0",
@@ -112,31 +113,31 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
               class={`settings-nav-btn ${activeTab() === "editor" ? "active" : ""}`}
               onClick={() => setActiveTab("editor")}
             >
-              🎨 外观与编辑器
+              {t("settings.tab_editor")}
             </button>
             <button
               class={`settings-nav-btn ${activeTab() === "diff" ? "active" : ""}`}
               onClick={() => setActiveTab("diff")}
             >
-              ⇄ 对比与快捷键
+              {t("settings.tab_diff")}
             </button>
             <button
               class={`settings-nav-btn ${activeTab() === "folder" ? "active" : ""}`}
               onClick={() => setActiveTab("folder")}
             >
-              📁 文件夹比对
+              {t("settings.tab_folder")}
             </button>
             <button
               class={`settings-nav-btn ${activeTab() === "git" ? "active" : ""}`}
               onClick={() => setActiveTab("git")}
             >
-              🔧 Git 与系统
+              {t("settings.tab_git")}
             </button>
             <button
               class={`settings-nav-btn ${activeTab() === "about" ? "active" : ""}`}
               onClick={() => setActiveTab("about")}
             >
-              ℹ️ 关于与版本
+              {t("settings.tab_about")}
             </button>
           </div>
 
@@ -148,27 +149,52 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                   {/* Tab 1: Editor & Appearance */}
                   <Show when={activeTab() === "editor"}>
                     <div class="settings-group">
-                      <h4 class="settings-title">主题与界面</h4>
+                      <h4 class="settings-title">{t("settings.language_title")}</h4>
+                      <p style={{ "font-size": "12px", opacity: "0.8", "margin-bottom": "8px" }}>
+                        {t("settings.language_desc")}
+                      </p>
+                      <div class="settings-pill-group" style={{ "margin-bottom": "16px" }}>
+                        <button
+                          class={`mini-btn ${currentLocale() === "zh-CN" ? "active" : ""}`}
+                          onClick={() => {
+                            setLocale("zh-CN");
+                            updateField("language", "zh-CN");
+                          }}
+                        >
+                          {t("settings.lang_zh")}
+                        </button>
+                        <button
+                          class={`mini-btn ${currentLocale() === "en-US" ? "active" : ""}`}
+                          onClick={() => {
+                            setLocale("en-US");
+                            updateField("language", "en-US");
+                          }}
+                        >
+                          {t("settings.lang_en")}
+                        </button>
+                      </div>
+
+                      <h4 class="settings-title">{t("settings.theme_title")}</h4>
                       <div class="settings-row">
-                        <span>界面主题</span>
+                        <span>{t("settings.theme_title")}</span>
                         <div class="settings-pill-group">
                           <button
                             class={`mini-btn ${p().theme === "dark" ? "active" : ""}`}
                             onClick={() => updateField("theme", "dark")}
                           >
-                            🌙 深色模式
+                            {t("settings.theme_dark")}
                           </button>
                           <button
                             class={`mini-btn ${p().theme === "light" ? "active" : ""}`}
                             onClick={() => updateField("theme", "light")}
                           >
-                            ☀️ 浅色模式
+                            {t("settings.theme_light")}
                           </button>
                         </div>
                       </div>
 
                       <div class="settings-row">
-                        <span>代码字体大小 ({p().editor_font_size || 13}px)</span>
+                        <span>{t("settings.font_size")} ({p().editor_font_size || 13}px)</span>
                         <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
                           <input
                             type="range"
@@ -184,20 +210,20 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>Tab 制表符宽度</span>
+                        <span>{t("settings.tab_width")}</span>
                         <select
                           class="settings-select"
                           value={p().tab_width || 4}
                           onChange={(e) => updateField("tab_width", Number(e.currentTarget.value))}
                         >
-                          <option value="2">2 个空格</option>
-                          <option value="4">4 个空格 (默认)</option>
-                          <option value="8">8 个空格</option>
+                          <option value="2">2</option>
+                          <option value="4">4</option>
+                          <option value="8">8</option>
                         </select>
                       </div>
 
                       <div class="settings-row">
-                        <span>默认显示可见空白符 (· 空格 / → 制表符)</span>
+                        <span>{t("settings.show_whitespace")}</span>
                         <input
                           type="checkbox"
                           checked={p().show_whitespace_glyphs}
@@ -206,7 +232,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>默认显示底部“当前行详情对比”放大镜栏</span>
+                        <span>{t("settings.line_inspector")}</span>
                         <input
                           type="checkbox"
                           checked={p().show_line_inspector}
@@ -219,9 +245,9 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                   {/* Tab 2: Diff & Navigation */}
                   <Show when={activeTab() === "diff"}>
                     <div class="settings-group">
-                      <h4 class="settings-title">差异识别与定位行为</h4>
+                      <h4 class="settings-title">{t("settings.tab_diff")}</h4>
                       <div class="settings-row">
-                        <span>打开文件时自动滚动定位到第 1 处差异块</span>
+                        <span>{t("settings.auto_jump")}</span>
                         <input
                           type="checkbox"
                           checked={p().auto_jump_first_diff}
@@ -230,7 +256,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>差异块跳转到达末尾后循环回到开头 (Wrap Around)</span>
+                        <span>{t("settings.wrap_around")}</span>
                         <input
                           type="checkbox"
                           checked={p().wrap_around_navigation}
@@ -239,7 +265,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>存在未保存修改时，按 Esc / 关闭窗口前弹窗确认</span>
+                        <span>{t("settings.confirm_exit_dirty")}</span>
                         <input
                           type="checkbox"
                           checked={p().confirm_before_exit_dirty}
@@ -248,7 +274,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>文本对比默认“忽略空白字符差异”</span>
+                        <span>{t("text_diff.ignore_whitespace_tip")}</span>
                         <input
                           type="checkbox"
                           checked={p().ignore_whitespace}
@@ -257,7 +283,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
-                        <span>文本对比默认“忽略英文字母大小写差异”</span>
+                        <span>{t("text_diff.ignore_case_tip")}</span>
                         <input
                           type="checkbox"
                           checked={p().ignore_case}
@@ -270,28 +296,28 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                   {/* Tab 3: Folder Compare */}
                   <Show when={activeTab() === "folder"}>
                     <div class="settings-group">
-                      <h4 class="settings-title">文件夹比对策略</h4>
+                      <h4 class="settings-title">{t("settings.tab_folder")}</h4>
                       <div class="settings-row">
-                        <span>默认文件夹比对算法模式</span>
+                        <span>{t("settings.folder_mode")}</span>
                         <div class="settings-pill-group">
                           <button
                             class={`mini-btn ${p().folder_compare_mode === "hash" ? "active" : ""}`}
                             onClick={() => updateField("folder_compare_mode", "hash")}
                           >
-                            ⚡ BLAKE3 内容哈希 (精准)
+                            ⚡ {t("folder_diff.mode_hash")}
                           </button>
                           <button
                             class={`mini-btn ${p().folder_compare_mode === "fast" ? "active" : ""}`}
                             onClick={() => updateField("folder_compare_mode", "fast")}
                           >
-                            🚀 大小+修改时间 (快扫)
+                            🚀 {t("folder_diff.mode_fast")}
                           </button>
                         </div>
                       </div>
 
                       <div style={{ "margin-top": "12px" }}>
                         <span style={{ "font-size": "13px", "font-weight": "500" }}>
-                          文件夹比对默认排除规则 (用逗号或分号分隔)：
+                          {t("settings.folder_exclude")}
                         </span>
                         <textarea
                           class="path-text-input"
@@ -310,7 +336,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                         />
                         <div style={{ "margin-top": "6px", display: "flex", "justify-content": "flex-end" }}>
                           <button class="bc-tool-btn" onClick={saveGlobs}>
-                            💾 保存排除规则
+                            {t("settings.save_globs")}
                           </button>
                         </div>
                       </div>
@@ -320,23 +346,23 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                   {/* Tab 4: Git & Reset */}
                   <Show when={activeTab() === "git"}>
                     <div class="settings-group">
-                      <h4 class="settings-title">Git 工具链集成</h4>
+                      <h4 class="settings-title">{t("settings.git_title")}</h4>
                       <p style={{ "font-size": "12px", opacity: "0.8", "margin-bottom": "10px" }}>
-                        将本机的 <code>fcompare</code> 注册为全局 Git 的 <code>difftool</code> 与 <code>mergetool</code>（完美接管 Git 内置的 Beyond Compare <code>bc</code> 驱动）。
+                        {t("settings.git_desc")}
                       </p>
                       <button class="bc-tool-btn active" onClick={handleInstallGit} style={{ padding: "6px 14px" }}>
-                        🔗 一键注册并接管 Git difftool / mergetool
+                        {t("settings.git_install_btn")}
                       </button>
 
                       <h4 class="settings-title" style={{ "margin-top": "24px" }}>
-                        缓存与历史清理
+                        {t("settings.history_title")}
                       </h4>
-                      <div style={{ display: "flex", gap: "10px" }}>
+                      <div style={{ display: "flex", gap: "10px", "flex-wrap": "wrap" }}>
                         <button class="bc-tool-btn" onClick={handleClearHistory}>
-                          🗑️ 清空路径输入历史与记录
+                          {t("settings.clear_history_btn")}
                         </button>
                         <button class="bc-tool-btn" onClick={handleResetDefaults}>
-                          🔄 恢复出厂默认设置
+                          {t("settings.reset_defaults_btn")}
                         </button>
                       </div>
                     </div>
@@ -345,28 +371,28 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                   {/* Tab 5: About & Diagnostics */}
                   <Show when={activeTab() === "about"}>
                     <div class="settings-group">
-                      <h4 class="settings-title">FreeCompare 版本与执行程序诊断</h4>
+                      <h4 class="settings-title">{t("about.modal_title")}</h4>
                       <Show
                         when={appInfo()}
-                        fallback={<p style={{ "font-size": "12px", opacity: "0.8" }}>正在加载版本信息...</p>}
+                        fallback={<p style={{ "font-size": "12px", opacity: "0.8" }}>{t("about.loading")}</p>}
                       >
                         {(info) => (
                           <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "margin-top": "12px" }}>
                             <div>
                               <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
-                                应用版本
+                                {t("about.version")}
                               </div>
                               <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
                                 <span style={{ "font-weight": "bold", "font-size": "14px" }}>v{info().version}</span>
                                 <span class="about-tag">
-                                  {info().build_profile === "release" ? "正式版 Release" : "调试版 Debug"}
+                                  {info().build_profile === "release" ? t("about.release") : t("about.debug")}
                                 </span>
                               </div>
                             </div>
 
                             <div>
                               <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
-                                Git 提交 Hash
+                                {t("about.git_hash")}
                               </div>
                               <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
                                 <code class="about-code-block" style={{ "max-width": "120px" }}>
@@ -376,20 +402,20 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                                   class="about-copy-btn"
                                   onClick={async () => {
                                     await navigator.clipboard.writeText(info().git_hash);
-                                    notify("已复制完整 Git Hash");
+                                    notify(t("about.copied_hash"));
                                   }}
                                 >
-                                  📋 复制完整 Hash
+                                  {t("about.copy_hash")}
                                 </button>
                                 <Show when={info().git_dirty}>
-                                  <span class="about-dirty-tag">dirty</span>
+                                  <span class="about-dirty-tag">{t("about.dirty_badge")}</span>
                                 </Show>
                               </div>
                             </div>
 
                             <div>
                               <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
-                                🎯 正在调用的二进制文件路径 (Binary Path)
+                                {t("about.binary_path")}
                               </div>
                               <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
                                 <code class="about-code-block binary-path-block" style={{ flex: "1" }}>
@@ -399,17 +425,17 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                                   class="about-copy-btn"
                                   onClick={async () => {
                                     await navigator.clipboard.writeText(info().binary_path);
-                                    notify("已复制二进制路径");
+                                    notify(t("about.copied_path"));
                                   }}
                                 >
-                                  📋 复制路径
+                                  {t("about.copy_path")}
                                 </button>
                               </div>
                             </div>
 
                             <div>
                               <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
-                                目标架构
+                                {t("about.target_arch")}
                               </div>
                               <span style={{ "font-family": "monospace", "font-size": "12.5px" }}>
                                 {info().target_triple}
@@ -429,10 +455,10 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                                     `Build Profile: ${info().build_profile}`,
                                   ].join("\n");
                                   await navigator.clipboard.writeText(text);
-                                  notify("已复制全部诊断信息");
+                                  notify(t("about.copied_all"));
                                 }}
                               >
-                                📋 复制全部诊断信息
+                                {t("about.copy_all")}
                               </button>
                             </div>
                           </div>
@@ -448,7 +474,7 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
 
         <div class="modal-footer" style={{ "justify-content": "flex-end" }}>
           <button class="bc-tool-btn active" onClick={props.onClose}>
-            完成并关闭
+            {t("settings.done_close")}
           </button>
         </div>
 

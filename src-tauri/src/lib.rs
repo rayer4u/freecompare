@@ -812,6 +812,9 @@ impl AppBackend {
                 if let Some(t) = args["theme"].as_str() {
                     current.theme = t.to_string();
                 }
+                if let Some(l) = args["language"].as_str() {
+                    current.language = l.to_string();
+                }
                 if let Some(b) = args["ignore_whitespace"].as_bool() {
                     current.ignore_whitespace = b;
                 }

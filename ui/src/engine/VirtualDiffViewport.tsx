@@ -7,6 +7,7 @@ import {
   TwoWayHunk,
   ViewportRowDto,
 } from "../types";
+import { t } from "../i18n";
 
 export const ROW_HEIGHT = 24;
 export const OVERSCAN_ROWS = 12;
@@ -178,10 +179,9 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
             <Show when={props.leftLineCount === 0}>
               <div class="empty-paste-overlay">
                 <div class="paste-hint-card">
-                  <strong>左侧暂无文本</strong>
+                  <strong>{t("text_diff.empty_left_title")}</strong>
                   <span>
-                    点击此处直接按 <kbd>Ctrl+V</kbd> 粘贴剪贴板文字，或点击上方{" "}
-                    <kbd>📋 粘贴</kbd> / <kbd>📂 浏览</kbd> 选择文件
+                    {t("text_diff.empty_desc")}
                   </span>
                 </div>
               </div>
@@ -308,7 +308,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                   >
                     <button
                       class="gutter-copy-btn copy-right"
-                      title="复制此差异块到右侧 (Alt+Right)"
+                      title={t("text_diff.copy_to_right_tip")}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onMergeHunk(hunk.id, "left_to_right");
@@ -318,7 +318,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                     </button>
                     <button
                       class="gutter-copy-btn copy-left"
-                      title="复制此差异块到左侧 (Alt+Left)"
+                      title={t("text_diff.copy_to_left_tip")}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onMergeHunk(hunk.id, "right_to_left");
@@ -353,10 +353,9 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
             <Show when={props.rightLineCount === 0}>
               <div class="empty-paste-overlay">
                 <div class="paste-hint-card">
-                  <strong>右侧暂无文本</strong>
+                  <strong>{t("text_diff.empty_right_title")}</strong>
                   <span>
-                    点击此处直接按 <kbd>Ctrl+V</kbd> 粘贴剪贴板文字，或点击上方{" "}
-                    <kbd>📋 粘贴</kbd> / <kbd>📂 浏览</kbd> 选择文件
+                    {t("text_diff.empty_desc")}
                   </span>
                 </div>
               </div>
@@ -441,7 +440,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
       </div>
 
       {/* Right-hand Beyond Compare Style Overview Bar (Minimap) */}
-      <div class="overview-minimap-rail" title="点击快速定位全局差异位置">
+      <div class="overview-minimap-rail" title={t("text_diff.minimap_tip")}>
         <canvas
           ref={overviewCanvasRef}
           width="18"

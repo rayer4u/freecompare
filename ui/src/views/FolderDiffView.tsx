@@ -6,6 +6,7 @@ import {
   UserPreferencesDto,
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
+import { t } from "../i18n";
 import {
   FolderDiffResult,
   FolderEntryDto,
@@ -31,6 +32,7 @@ interface FolderDiffViewProps {
     rightFullPath: string,
     relativePath: string
   ) => void;
+  onUpdateTabTitle?: (newTitle: string) => void;
 }
 
 type FilterStatus = "all" | "diffs" | "orphans" | "equals";
@@ -55,6 +57,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [browserSide, setBrowserSide] = createSignal<"left" | "right" | null>(null);
   const [recentFolders, setRecentFolders] = createSignal<string[]>([]);
   const [toast, setToast] = createSignal<string | null>(null);
+  let lastReportedTitle = "";
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -65,7 +68,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     const l = lDir.trim();
     const r = rDir.trim();
     if (!l || !r) {
-      notify("请先输入或浏览选择左侧与右侧文件夹路径");
+      notify(t("folder_diff.path_left_placeholder"));
       return;
     }
     try {
@@ -98,19 +101,30 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         if (firstDiffFile) {
           setSelectedRelPath(firstDiffFile.relative_path);
         }
-        notify(
-          recursive
-            ? `已递归扫描目录: 共 ${res.stats.total_items} 个文件`
-            : `已扫描当前层: 共 ${res.entries.length} 个项目 (子文件夹可右键嵌套比较)`
-        );
+        const lClean = res.left_root.replace(/[/\\]+$/, "");
+        const rClean = res.right_root.replace(/[/\\]+$/, "");
+        const lBase = lClean ? lClean.split(/[/\\]/).pop() || lClean : "";
+        const rBase = rClean ? rClean.split(/[/\\]/).pop() || rClean : "";
+        const folderTitle =
+          lBase === rBase
+            ? lBase
+            : lBase && rBase
+            ? `${lBase} ↔ ${rBase}`
+            : lBase || rBase;
+        if (folderTitle && folderTitle !== lastReportedTitle) {
+          lastReportedTitle = folderTitle;
+          props.onUpdateTabTitle?.(`📁 ${folderTitle}`);
+        }
+      } else {
+        notify(t("folder_diff.err_scan"));
       }
-    } catch (err) {
-      notify(err instanceof Error ? err.message : String(err));
+    } catch {
+      notify(t("folder_diff.err_scan"));
     }
   };
 
   const handleCompareSubfolder = async (subRel: string, recursive = false) => {
-    notify(`正在扫描子目录: ${subRel}...`);
+    notify(t("folder_diff.scanning_subdir", { path: subRel }));
     try {
       const res = await callRustRpc<FolderSubtreeResult>("compare_subfolder", {
         left_dir: folderData().left_root,
@@ -165,7 +179,12 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           return next;
         });
 
-        notify(`已完成 ${res.relative_path} 的扫描: 发现 ${res.entries.length} 个子项`);
+        notify(
+          t("folder_diff.scan_subdir_done", {
+            path: res.relative_path,
+            count: res.entries.length,
+          })
+        );
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err));
@@ -322,14 +341,14 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const expandAll = async () => {
-    notify("正在展开所有文件夹...");
+    notify(t("folder_diff.expanding_all"));
     // If not in recursive full scan mode yet, trigger recursive scan to fetch all nested items
     if (!isRecursiveScan()) {
       setIsRecursiveScan(true);
       await scanRealFolders(leftInput(), rightInput(), true);
     }
     setCollapsedDirs(new Set<string>());
-    notify("已展开全部文件夹");
+    notify(t("folder_diff.expanded_all"));
   };
 
   const collapseAll = () => {
@@ -337,7 +356,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       .entries.filter((e) => e.is_dir)
       .map((e) => e.relative_path);
     setCollapsedDirs(new Set(dirs));
-    notify("已折叠全部文件夹");
+    notify(t("folder_diff.collapsed_all"));
   };
 
   const handleSwapFolders = () => {
@@ -409,8 +428,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       setFolderData(remoteRes);
       notify(
         direction === "left_to_right"
-          ? `已复制文件到右侧目录: ${rel}`
-          : `已复制文件到左侧目录: ${rel}`
+          ? t("folder_diff.copied_to_right_done", { path: rel })
+          : t("folder_diff.copied_to_left_done", { path: rel })
       );
       return;
     }
@@ -454,25 +473,25 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             class={`bc-tool-btn ${filterStatus() === "all" ? "active" : ""}`}
             onClick={() => updateFilterAndPersist("all")}
           >
-            ✱ 全部项
+            {t("folder_diff.filter_all")}
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "diffs" ? "active" : ""}`}
             onClick={() => updateFilterAndPersist("diffs")}
           >
-            ≠ 仅差异
+            {t("folder_diff.filter_diffs")}
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "orphans" ? "active" : ""}`}
             onClick={() => updateFilterAndPersist("orphans")}
           >
-            ◐ 仅孤立项
+            {t("folder_diff.filter_orphans")}
           </button>
           <button
             class={`bc-tool-btn ${filterStatus() === "equals" ? "active" : ""}`}
             onClick={() => updateFilterAndPersist("equals")}
           >
-            ＝ 仅相同
+            {t("folder_diff.filter_equals")}
           </button>
         </div>
 
@@ -480,14 +499,21 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
         <div class="bc-toolbar-group">
           <button
+            class="bc-tool-btn"
+            onClick={() => scanRealFolders(leftInput(), rightInput(), isRecursiveScan())}
+            title={t("folder_diff.scan_btn")}
+          >
+            🔄 {t("folder_diff.scan_btn")}
+          </button>
+          <button
             class={`bc-tool-btn ${!isRecursiveScan() ? "active" : ""}`}
             onClick={() => {
               setIsRecursiveScan(false);
               scanRealFolders(leftInput(), rightInput(), false);
             }}
-            title="默认模式：仅比较当前层目录，子文件夹不自动递归展开"
+            title={t("folder_diff.shallow_scan_tip")}
           >
-            📁 仅当前层
+            {t("folder_diff.shallow_scan")}
           </button>
           <button
             class={`bc-tool-btn ${isRecursiveScan() ? "active" : ""}`}
@@ -495,15 +521,15 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               setIsRecursiveScan(true);
               scanRealFolders(leftInput(), rightInput(), true);
             }}
-            title="递归扫描全部嵌套子文件夹"
+            title={t("folder_diff.recursive_scan_tip")}
           >
-            🔍 嵌套比较全部
+            {t("folder_diff.recursive_scan")}
           </button>
-          <button class="bc-tool-btn" onClick={expandAll} title="展开全部子文件夹">
-            ⊞ 展开全部
+          <button class="bc-tool-btn" onClick={expandAll} title={t("folder_diff.expand_all_tip")}>
+            {t("folder_diff.expand_all")}
           </button>
-          <button class="bc-tool-btn" onClick={collapseAll} title="折叠全部子文件夹">
-            ⊟ 折叠全部
+          <button class="bc-tool-btn" onClick={collapseAll} title={t("folder_diff.collapse_all_tip")}>
+            {t("folder_diff.collapse_all")}
           </button>
           <button
             class={`bc-tool-btn ${compareMode() === "hash" ? "active" : ""}`}
@@ -518,24 +544,26 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               }
             }}
           >
-            ⚡ 模式: {compareMode() === "hash" ? "BLAKE3 哈希" : "元数据快扫"}
+            {t("folder_diff.mode_label", {
+              mode: compareMode() === "hash" ? t("folder_diff.mode_hash") : t("folder_diff.mode_fast"),
+            })}
           </button>
           <button
             class="bc-tool-btn accent-right"
             disabled={!selectedRelPath()}
             onClick={() => handleCopyItem("left_to_right")}
           >
-            复制到右 »
+            {t("folder_diff.copy_to_right")}
           </button>
           <button
             class="bc-tool-btn accent-left"
             disabled={!selectedRelPath()}
             onClick={() => handleCopyItem("right_to_left")}
           >
-            « 复制到左
+            {t("folder_diff.copy_to_left")}
           </button>
           <button class="bc-tool-btn" onClick={handleSwapFolders}>
-            ⇄ 交换左右
+            {t("folder_diff.swap_sides")}
           </button>
         </div>
 
@@ -543,17 +571,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
         <input
           class="folder-filter-input"
-          placeholder="过滤文件名或路径..."
+          placeholder={t("folder_diff.filter_placeholder")}
           value={searchQuery()}
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
         />
-
-        <div class="bc-stats-pills">
-          <span class="stat-pill mod">差异文件: {folderData().stats.modified_items}</span>
-          <span class="stat-pill ins">左独有: {folderData().stats.left_only_items}</span>
-          <span class="stat-pill del">右独有: {folderData().stats.right_only_items}</span>
-          <span class="stat-pill eq">相同: {folderData().stats.equal_items}</span>
-        </div>
       </div>
 
       {/* Folder Root Paths */}
@@ -563,15 +584,24 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <input
             class="path-text-input"
             list="mru-folder-paths"
-            placeholder="输入或浏览选择左侧文件夹路径..."
+            placeholder={t("folder_diff.path_left_placeholder")}
             value={leftInput()}
             onInput={(e) => setLeftInput(e.currentTarget.value)}
             onKeyDown={(e) =>
               e.key === "Enter" && scanRealFolders(leftInput(), rightInput())
             }
+            onBlur={() => {
+              if (leftInput().trim() && rightInput().trim()) {
+                scanRealFolders(leftInput(), rightInput());
+              }
+            }}
           />
-          <button class="browse-btn" onClick={() => setBrowserSide("left")}>
-            📂 浏览...
+          <button
+            class="browse-btn"
+            title={t("common.browse")}
+            onClick={() => setBrowserSide("left")}
+          >
+            📂
           </button>
         </div>
         <div class="path-input-box">
@@ -579,24 +609,27 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <input
             class="path-text-input"
             list="mru-folder-paths"
-            placeholder="输入或浏览选择右侧文件夹路径..."
+            placeholder={t("folder_diff.path_right_placeholder")}
             value={rightInput()}
             onInput={(e) => setRightInput(e.currentTarget.value)}
             onKeyDown={(e) =>
               e.key === "Enter" && scanRealFolders(leftInput(), rightInput())
             }
+            onBlur={() => {
+              if (leftInput().trim() && rightInput().trim()) {
+                scanRealFolders(leftInput(), rightInput());
+              }
+            }}
           />
           <datalist id="mru-folder-paths">
             <For each={recentFolders()}>{(p) => <option value={p} />}</For>
           </datalist>
-          <button class="browse-btn" onClick={() => setBrowserSide("right")}>
-            📂 浏览...
-          </button>
           <button
             class="browse-btn"
-            onClick={() => scanRealFolders(leftInput(), rightInput())}
+            title={t("common.browse")}
+            onClick={() => setBrowserSide("right")}
           >
-            🔄 开始对比
+            📂
           </button>
         </div>
       </div>
@@ -605,15 +638,15 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       <div class="folder-tree-container">
         <div class="folder-tree-header">
           <div class="folder-col-left">
-            <span class="col-name">左侧名称 (双击文件打开文本对比)</span>
-            <span class="col-size">大小</span>
-            <span class="col-time">修改时间</span>
+            <span class="col-name">{t("folder_diff.col_name")}</span>
+            <span class="col-size">{t("folder_diff.col_left_size")}</span>
+            <span class="col-time">{t("folder_diff.col_modified")}</span>
           </div>
-          <div class="folder-col-center">操作</div>
+          <div class="folder-col-center">{t("folder_diff.col_status")}</div>
           <div class="folder-col-right">
-            <span class="col-name">右侧名称</span>
-            <span class="col-size">大小</span>
-            <span class="col-time">修改时间</span>
+            <span class="col-name">{t("folder_diff.col_name")}</span>
+            <span class="col-size">{t("folder_diff.col_right_size")}</span>
+            <span class="col-time">{t("folder_diff.col_modified")}</span>
           </div>
         </div>
 
@@ -621,9 +654,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <Show when={folderData().entries.length === 0}>
             <div class="empty-paste-overlay">
               <div class="paste-hint-card">
-                <strong>尚未加载对比文件夹</strong>
+                <strong>{t("folder_diff.empty_title")}</strong>
                 <span>
-                  请在上方输入左右文件夹路径，或点击 <kbd>📂 浏览...</kbd> 选择本地目录进行对比
+                  {t("folder_diff.empty_desc")}
                 </span>
               </div>
             </div>
@@ -654,7 +687,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setSelectedRelPath(entry.relative_path);
-                  setContextMenu({ x: e.clientX, y: e.clientY, entry });
+                  const x = Math.min(e.clientX, window.innerWidth - 220);
+                  const y = Math.min(e.clientY, window.innerHeight - 250);
+                  setContextMenu({ x, y, entry });
                 }}
                 onCopyRight={() => handleCopyItem("left_to_right", entry.relative_path)}
                 onCopyLeft={() => handleCopyItem("right_to_left", entry.relative_path)}
@@ -685,7 +720,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                   handleCompareSubfolder(rel, true);
                 }}
               >
-                <span>🔍 嵌套比较此文件夹 (递归对比)</span>
+                <span>🔍 {t("folder_diff.subfolder_nested_compare")}</span>
               </div>
               <Show when={props.onOpenFolderDiff}>
                 <div
@@ -702,7 +737,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                     );
                   }}
                 >
-                  <span>📂 在新标签页中打开</span>
+                  <span>📂 {t("folder_diff.open_in_new_tab")}</span>
                 </div>
               </Show>
               <div class="ctx-divider" />
@@ -716,8 +751,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               >
                 <span>
                   {collapsedDirs().has(menu().entry.relative_path)
-                    ? "⊞ 展开此文件夹"
-                    : "⊟ 折叠此文件夹"}
+                    ? t("folder_diff.expand_dir")
+                    : t("folder_diff.collapse_dir")}
                 </span>
               </div>
             </Show>
@@ -730,7 +765,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                   openEntry(item);
                 }}
               >
-                <span>⇄ 打开文本对比 (Enter / 双击)</span>
+                <span>⇄ {t("folder_diff.open_text_diff")}</span>
               </div>
               <div class="ctx-divider" />
             </Show>
@@ -742,7 +777,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 handleCopyItem("left_to_right", rel);
               }}
             >
-              <span>» 复制到右侧</span>
+              <span>{t("folder_diff.copy_to_right_item")}</span>
             </div>
             <div
               class="ctx-item"
@@ -752,7 +787,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 handleCopyItem("right_to_left", rel);
               }}
             >
-              <span>« 复制到左侧</span>
+              <span>{t("folder_diff.copy_to_left_item")}</span>
             </div>
             <div class="ctx-divider" />
             <div
@@ -761,20 +796,44 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 const rel = menu().entry.relative_path;
                 setContextMenu(null);
                 navigator.clipboard.writeText(rel);
-                notify(`已复制相对路径: ${rel}`);
+                notify(t("folder_diff.copied_rel_path", { path: rel }));
               }}
             >
-              <span>📋 复制相对路径</span>
+              <span>{t("folder_diff.copy_rel_path_item")}</span>
             </div>
           </div>
         )}
       </Show>
 
+      {/* Bottom Status Bar for Folder Diff */}
+      <footer class="app-statusbar">
+        <div class="statusbar-left">
+          <span class="statusbar-item">
+            {folderData().entries.length} 项
+          </span>
+        </div>
+        <div class="statusbar-center">
+          <span class="stat-pill mod">{t("folder_diff.stat_mod", { count: folderData().stats.modified_items })}</span>
+          <span class="stat-pill ins">{t("folder_diff.stat_left", { count: folderData().stats.left_only_items })}</span>
+          <span class="stat-pill del">{t("folder_diff.stat_right", { count: folderData().stats.right_only_items })}</span>
+          <span class="stat-pill eq">{t("folder_diff.stat_same", { count: folderData().stats.equal_items })}</span>
+        </div>
+        <div class="statusbar-right">
+          <button
+            class="statusbar-exit-btn"
+            onClick={props.onCloseOrExit}
+            title={t("text_diff.exit_btn_tip")}
+          >
+            {t("text_diff.exit_btn")}
+          </button>
+        </div>
+      </footer>
+
       <Show when={browserSide()}>
         {(side) => (
           <FileBrowserModal
             mode="folder"
-            title={side() === "left" ? "选择左侧文件夹" : "选择右侧文件夹"}
+            title={side() === "left" ? t("folder_diff.browse_left_title") : t("folder_diff.browse_right_title")}
             initialPath={side() === "left" ? leftInput() : rightInput()}
             onClose={() => setBrowserSide(null)}
             onSelect={(selectedDir) => {
@@ -851,12 +910,12 @@ const FolderRow: Component<{
           </Show>
           <span class="entry-icon">{props.entry.is_dir ? "📁" : "📄"}</span>
           <span class={hasLeft() ? "entry-label" : "entry-missing"}>
-            {hasLeft() ? props.entry.name : "— (不存在)"}
+            {hasLeft() ? props.entry.name : t("folder_diff.missing_tag")}
           </span>
           <Show when={props.entry.is_dir && props.onOpenFolderDiff}>
             <button
               class="dir-open-tab-btn"
-              title="在新的标签页中打开此文件夹比较 (或按住 Ctrl 双击)"
+              title={t("folder_diff.open_tab_tip")}
               onClick={(e) => {
                 e.stopPropagation();
                 props.onOpenFolderDiff?.();
@@ -866,8 +925,8 @@ const FolderRow: Component<{
             </button>
           </Show>
           <Show when={props.entry.is_dir && props.entry.status === "unknown"}>
-            <span class="uncompared-badge" title="未嵌套比较，右键选择“嵌套比较”或点击展开">
-              未嵌套比较
+            <span class="uncompared-badge" title={t("folder_diff.uncompared_tip")}>
+              {t("folder_diff.uncompared_tag")}
             </span>
           </Show>
         </span>
@@ -879,7 +938,7 @@ const FolderRow: Component<{
         <Show when={!props.entry.is_dir && props.entry.status !== "equal"}>
           <button
             class="gutter-copy-btn"
-            title="复制到右侧"
+            title={t("folder_diff.copy_right_tip")}
             onClick={(e) => {
               e.stopPropagation();
               props.onCopyRight();
@@ -902,7 +961,7 @@ const FolderRow: Component<{
         <Show when={!props.entry.is_dir && props.entry.status !== "equal"}>
           <button
             class="gutter-copy-btn"
-            title="复制到左侧"
+            title={t("folder_diff.copy_left_tip")}
             onClick={(e) => {
               e.stopPropagation();
               props.onCopyLeft();
@@ -917,7 +976,7 @@ const FolderRow: Component<{
         <span class="col-name" style={{ "padding-left": indentPx() }}>
           <span class="entry-icon">{props.entry.is_dir ? "📁" : "📄"}</span>
           <span class={hasRight() ? "entry-label" : "entry-missing"}>
-            {hasRight() ? props.entry.name : "— (不存在)"}
+            {hasRight() ? props.entry.name : t("folder_diff.missing_tag")}
           </span>
         </span>
         <span class="col-size">{formatBytes(props.entry.right_size)}</span>
@@ -930,14 +989,19 @@ const FolderRow: Component<{
 function formatBytes(size: number | null): string {
   if (size === null) return "";
   if (size < 1024) return `${size} B`;
-  return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function formatTime(ms: number | null): string {
   if (!ms) return "";
   const d = new Date(ms);
-  return `${d.getHours().toString().padStart(2, "0")}:${d
-    .getMinutes()
-    .toString()
-    .padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
+  const year = d.getFullYear();
+  const month = (d.getMonth() + 1).toString().padStart(2, "0");
+  const day = d.getDate().toString().padStart(2, "0");
+  const hours = d.getHours().toString().padStart(2, "0");
+  const mins = d.getMinutes().toString().padStart(2, "0");
+  const secs = d.getSeconds().toString().padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
 }

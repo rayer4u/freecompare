@@ -1,5 +1,6 @@
 import { Component, createSignal, For, onMount, Show } from "solid-js";
 import { callRustRpc } from "../bridge";
+import { t } from "../i18n";
 
 export interface FsEntryDto {
   name: string;
@@ -42,7 +43,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
         setEntries(res.entries);
         setSelectedItem(null);
       } else {
-        setErrorMsg("无法连接本地文件系统服务");
+        setErrorMsg(t("file_browser.err_service"));
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -88,9 +89,9 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
             class="bc-tool-btn"
             disabled={!parentDir()}
             onClick={() => parentDir() && loadDir(parentDir()!)}
-            title="返回上级目录"
+            title={t("file_browser.up_tip")}
           >
-            ⬆ 上级
+            {t("file_browser.up")}
           </button>
           <input
             class="path-text-input modal-dir-input"
@@ -99,7 +100,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
             onKeyDown={(e) => e.key === "Enter" && loadDir(currentDir())}
           />
           <button class="bc-tool-btn" onClick={() => loadDir(currentDir())}>
-            前往
+            {t("file_browser.go")}
           </button>
           <label class="hidden-toggle">
             <input
@@ -107,7 +108,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
               checked={showHidden()}
               onChange={(e) => setShowHidden(e.currentTarget.checked)}
             />
-            显示隐藏文件
+            {t("file_browser.show_hidden")}
           </label>
         </div>
 
@@ -134,7 +135,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
                 <span class="entry-icon">{item.is_dir ? "📁" : "📄"}</span>
                 <span class="modal-file-name">{item.name}</span>
                 <span class="modal-file-size">
-                  {item.is_dir ? "文件夹" : `${item.size} B`}
+                  {item.is_dir ? t("file_browser.folder_tag") : `${item.size} B`}
                 </span>
               </div>
             )}
@@ -144,19 +145,21 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
         <div class="modal-footer">
           <span class="modal-selection-hint">
             {props.mode === "folder"
-              ? `当前选择目录: ${selectedItem()?.path ?? currentDir()}`
-              : `当前选择文件: ${selectedItem()?.name ?? "(未选择文件，双击文件夹可进入)"}`}
+              ? t("file_browser.sel_folder", { path: selectedItem()?.path ?? currentDir() })
+              : selectedItem()
+              ? t("file_browser.sel_file", { name: selectedItem()!.name })
+              : t("file_browser.no_file")}
           </span>
           <div class="modal-footer-btns">
             <button class="bc-tool-btn" onClick={props.onClose}>
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="bc-tool-btn active"
               disabled={props.mode === "file" && (!selectedItem() || selectedItem()!.is_dir)}
               onClick={handleConfirm}
             >
-              确定选择
+              {t("file_browser.confirm_select")}
             </button>
           </div>
         </div>

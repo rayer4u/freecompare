@@ -14,3 +14,6 @@ freecompare-app = { path = "../../src-tauri" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"
