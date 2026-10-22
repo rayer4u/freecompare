@@ -298,6 +298,8 @@ fn test_folder_compare_and_sync() {
         mode: FolderCompareMode::ContentHash,
         ignore_case_names: false,
         exclude_globs: vec![],
+        recursive: true,
+        max_depth: None,
     };
 
     let res = compare_folders(left_dir.path(), right_dir.path(), &opts).unwrap();
@@ -326,4 +328,50 @@ fn test_folder_compare_and_sync() {
             .status,
         FolderItemStatus::Modified
     );
+}
+
+#[test]
+fn test_folder_compare_non_recursive_and_subfolder_nested() {
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+
+    let sub_left = left_dir.path().join("sub");
+    let sub_right = right_dir.path().join("sub");
+    fs::create_dir_all(&sub_left).unwrap();
+    fs::create_dir_all(&sub_right).unwrap();
+
+    fs::write(left_dir.path().join("root.txt"), b"root_same").unwrap();
+    fs::write(right_dir.path().join("root.txt"), b"root_same").unwrap();
+
+    fs::write(sub_left.join("nested.txt"), b"nested_left").unwrap();
+    fs::write(sub_right.join("nested.txt"), b"nested_right").unwrap();
+
+    // 1. Non-recursive (default): only compares current level (depth 0)
+    let non_rec_opts = FolderCompareOptions {
+        mode: FolderCompareMode::ContentHash,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: false,
+        max_depth: None,
+    };
+
+    let res_top = compare_folders(left_dir.path(), right_dir.path(), &non_rec_opts).unwrap();
+    assert_eq!(res_top.entries.len(), 2); // 1 file + 1 directory at depth 0
+    let sub_entry = res_top.entries.iter().find(|e| e.name == "sub").unwrap();
+    assert!(sub_entry.is_dir);
+    assert_eq!(sub_entry.status, FolderItemStatus::Unknown);
+
+    // 2. Nested compare single subfolder
+    let sub_res = freecompare_core::folder::compare_subfolder(
+        left_dir.path(),
+        right_dir.path(),
+        "sub",
+        &non_rec_opts,
+    )
+    .unwrap();
+    assert_eq!(sub_res.relative_path, "sub");
+    assert_eq!(sub_res.status, FolderItemStatus::Modified);
+    assert_eq!(sub_res.entries.len(), 1);
+    assert_eq!(sub_res.entries[0].name, "nested.txt");
+    assert_eq!(sub_res.entries[0].status, FolderItemStatus::Modified);
 }

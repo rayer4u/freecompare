@@ -10,18 +10,25 @@ import {
   FolderDiffResult,
   FolderEntryDto,
   FolderItemStatus,
+  FolderSubtreeResult,
   SiblingDiffFileItem,
 } from "../types";
 
 interface FolderDiffViewProps {
   initialLeftDir?: string;
   initialRightDir?: string;
+  expandAll?: boolean;
   onCloseOrExit?: () => void;
   onOpenFileDiff: (
     leftFullPath: string,
     rightFullPath: string,
     relativePath: string,
     siblingFiles: SiblingDiffFileItem[]
+  ) => void;
+  onOpenFolderDiff?: (
+    leftFullPath: string,
+    rightFullPath: string,
+    relativePath: string
   ) => void;
 }
 
@@ -38,6 +45,12 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [collapsedDirs, setCollapsedDirs] = createSignal<Set<string>>(new Set());
   const [selectedRelPath, setSelectedRelPath] = createSignal<string | null>(null);
   const [compareMode, setCompareMode] = createSignal<"hash" | "fast">("hash");
+  const [isRecursiveScan, setIsRecursiveScan] = createSignal(Boolean(props.expandAll));
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number;
+    y: number;
+    entry: FolderEntryDto;
+  } | null>(null);
   const [browserSide, setBrowserSide] = createSignal<"left" | "right" | null>(null);
   const [recentFolders, setRecentFolders] = createSignal<string[]>([]);
   const [toast, setToast] = createSignal<string | null>(null);
@@ -47,7 +60,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     setTimeout(() => setToast(null), 2500);
   };
 
-  const scanRealFolders = async (lDir: string, rDir: string) => {
+  const scanRealFolders = async (lDir: string, rDir: string, recursive = isRecursiveScan()) => {
     const l = lDir.trim();
     const r = rDir.trim();
     if (!l || !r) {
@@ -62,12 +75,20 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
           ignore_case_names: false,
           exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
+          recursive,
         },
       });
       if (res) {
         setFolderData(res);
         setLeftInput(res.left_root);
         setRightInput(res.right_root);
+        // By default: collapse all subfolders so only the current level is shown initially!
+        if (!props.expandAll && !recursive) {
+          const dirs = res.entries.filter((e) => e.is_dir).map((e) => e.relative_path);
+          setCollapsedDirs(new Set(dirs));
+        } else {
+          setCollapsedDirs(new Set<string>());
+        }
         // Prefer selecting the first modified/diff file automatically (like Beyond Compare)
         const firstDiffFile =
           res.entries.find((e) => !e.is_dir && e.status !== "equal") ??
@@ -76,7 +97,68 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         if (firstDiffFile) {
           setSelectedRelPath(firstDiffFile.relative_path);
         }
-        notify(`已扫描目录: 共 ${res.stats.total_items} 个文件`);
+        notify(
+          recursive
+            ? `已递归扫描目录: 共 ${res.stats.total_items} 个文件`
+            : `已扫描当前层: 共 ${res.entries.length} 个项目 (子文件夹可右键嵌套比较)`
+        );
+      }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleCompareSubfolder = async (subRel: string) => {
+    notify(`正在嵌套比较目录: ${subRel}...`);
+    try {
+      const res = await callRustRpc<FolderSubtreeResult>("compare_subfolder", {
+        left_dir: folderData().left_root,
+        right_dir: folderData().right_root,
+        sub_rel: subRel,
+        options: {
+          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+          ignore_case_names: false,
+          exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
+          recursive: true,
+        },
+      });
+      if (res) {
+        setFolderData((prev) => {
+          const cleanRel = res.relative_path;
+          const prefix = cleanRel + "/";
+          const parentIdx = prev.entries.findIndex((e) => e.relative_path === cleanRel);
+          if (parentIdx < 0) return prev;
+
+          const updated = [...prev.entries];
+          // Update parent folder status
+          updated[parentIdx] = { ...updated[parentIdx], status: res.status };
+
+          // Remove any previously cached children under this folder
+          let removeCount = 0;
+          for (let i = parentIdx + 1; i < updated.length; i++) {
+            if (updated[i].relative_path.startsWith(prefix)) {
+              removeCount++;
+            } else {
+              break;
+            }
+          }
+          updated.splice(parentIdx + 1, removeCount, ...res.entries);
+
+          return {
+            ...prev,
+            entries: updated,
+            stats: recomputeFolderStats(updated),
+          };
+        });
+
+        // Expand the subfolder
+        setCollapsedDirs((prev) => {
+          const next = new Set(prev);
+          next.delete(res.relative_path);
+          return next;
+        });
+
+        notify(`已完成 ${res.relative_path} 的嵌套比较: 发现 ${res.entries.length} 个子项`);
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err));
@@ -174,8 +256,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     callRustRpc("update_user_preferences", { folder_filter_status: next }).catch(() => {});
   };
 
+  const dismissMenu = () => setContextMenu(null);
+
   onMount(async () => {
     window.addEventListener("keydown", handleFolderKeyDown);
+    window.addEventListener("click", dismissMenu);
     const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
     if (prefs) {
       if (prefs.folder_compare_mode === "hash" || prefs.folder_compare_mode === "fast") {
@@ -198,9 +283,22 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
   onCleanup(() => {
     window.removeEventListener("keydown", handleFolderKeyDown);
+    window.removeEventListener("click", dismissMenu);
   });
 
-  const toggleDir = (relPath: string) => {
+  const toggleDir = async (relPath: string) => {
+    const isCurrentlyCollapsed = collapsedDirs().has(relPath);
+    if (isCurrentlyCollapsed) {
+      // If expanding, check if its children are already loaded
+      const prefix = relPath + "/";
+      const hasChildren = folderData().entries.some((e) =>
+        e.relative_path.startsWith(prefix)
+      );
+      if (!hasChildren) {
+        await handleCompareSubfolder(relPath);
+        return;
+      }
+    }
     setCollapsedDirs((prev) => {
       const next = new Set(prev);
       if (next.has(relPath)) next.delete(relPath);
@@ -209,7 +307,18 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     });
   };
 
-  const expandAll = () => setCollapsedDirs(new Set<string>());
+  const expandAll = async () => {
+    // If some folders are uncompared, trigger recursive scan to ensure all subfolders are compared & expanded
+    const hasUncompared = folderData().entries.some(
+      (e) => e.is_dir && e.status === "unknown"
+    );
+    if (hasUncompared) {
+      setIsRecursiveScan(true);
+      await scanRealFolders(leftInput(), rightInput(), true);
+    }
+    setCollapsedDirs(new Set<string>());
+  };
+
   const collapseAll = () => {
     const dirs = folderData()
       .entries.filter((e) => e.is_dir)
@@ -356,6 +465,26 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         <div class="bc-toolbar-divider" />
 
         <div class="bc-toolbar-group">
+          <button
+            class={`bc-tool-btn ${!isRecursiveScan() ? "active" : ""}`}
+            onClick={() => {
+              setIsRecursiveScan(false);
+              scanRealFolders(leftInput(), rightInput(), false);
+            }}
+            title="默认模式：仅比较当前层目录，子文件夹不自动递归展开"
+          >
+            📁 仅当前层
+          </button>
+          <button
+            class={`bc-tool-btn ${isRecursiveScan() ? "active" : ""}`}
+            onClick={() => {
+              setIsRecursiveScan(true);
+              scanRealFolders(leftInput(), rightInput(), true);
+            }}
+            title="递归扫描全部嵌套子文件夹"
+          >
+            🔍 嵌套比较全部
+          </button>
           <button class="bc-tool-btn" onClick={expandAll} title="展开全部子文件夹">
             ⊞ 展开全部
           </button>
@@ -495,6 +624,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 onSelect={() => setSelectedRelPath(entry.relative_path)}
                 onToggleDir={() => toggleDir(entry.relative_path)}
                 onOpenDiff={() => openEntry(entry)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSelectedRelPath(entry.relative_path);
+                  setContextMenu({ x: e.clientX, y: e.clientY, entry });
+                }}
                 onCopyRight={() => handleCopyItem("left_to_right", entry.relative_path)}
                 onCopyLeft={() => handleCopyItem("right_to_left", entry.relative_path)}
               />
@@ -502,6 +636,112 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           </For>
         </div>
       </div>
+
+      <Show when={contextMenu()}>
+        {(menu) => (
+          <div
+            class="folder-context-menu"
+            style={{
+              position: "fixed",
+              top: `${menu().y}px`,
+              left: `${menu().x}px`,
+              "z-index": 9999,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Show when={menu().entry.is_dir}>
+              <div
+                class="ctx-item highlight"
+                onClick={() => {
+                  const rel = menu().entry.relative_path;
+                  setContextMenu(null);
+                  handleCompareSubfolder(rel);
+                }}
+              >
+                <span>🔍 嵌套比较此文件夹 (递归对比)</span>
+              </div>
+              <Show when={props.onOpenFolderDiff}>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    const lRoot = folderData().left_root.replace(/\/$/, "");
+                    const rRoot = folderData().right_root.replace(/\/$/, "");
+                    const rel = menu().entry.relative_path;
+                    setContextMenu(null);
+                    props.onOpenFolderDiff?.(
+                      `${lRoot}/${rel}`,
+                      `${rRoot}/${rel}`,
+                      rel
+                    );
+                  }}
+                >
+                  <span>📂 在新标签页中打开</span>
+                </div>
+              </Show>
+              <div class="ctx-divider" />
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  const rel = menu().entry.relative_path;
+                  setContextMenu(null);
+                  toggleDir(rel);
+                }}
+              >
+                <span>
+                  {collapsedDirs().has(menu().entry.relative_path)
+                    ? "⊞ 展开此文件夹"
+                    : "⊟ 折叠此文件夹"}
+                </span>
+              </div>
+            </Show>
+            <Show when={!menu().entry.is_dir}>
+              <div
+                class="ctx-item highlight"
+                onClick={() => {
+                  const item = menu().entry;
+                  setContextMenu(null);
+                  openEntry(item);
+                }}
+              >
+                <span>⇄ 打开文本对比 (Enter / 双击)</span>
+              </div>
+              <div class="ctx-divider" />
+            </Show>
+            <div
+              class="ctx-item"
+              onClick={() => {
+                const rel = menu().entry.relative_path;
+                setContextMenu(null);
+                handleCopyItem("left_to_right", rel);
+              }}
+            >
+              <span>» 复制到右侧</span>
+            </div>
+            <div
+              class="ctx-item"
+              onClick={() => {
+                const rel = menu().entry.relative_path;
+                setContextMenu(null);
+                handleCopyItem("right_to_left", rel);
+              }}
+            >
+              <span>« 复制到左侧</span>
+            </div>
+            <div class="ctx-divider" />
+            <div
+              class="ctx-item"
+              onClick={() => {
+                const rel = menu().entry.relative_path;
+                setContextMenu(null);
+                navigator.clipboard.writeText(rel);
+                notify(`已复制相对路径: ${rel}`);
+              }}
+            >
+              <span>📋 复制相对路径</span>
+            </div>
+          </div>
+        )}
+      </Show>
 
       <Show when={browserSide()}>
         {(side) => (
@@ -543,6 +783,7 @@ const FolderRow: Component<{
   onSelect: () => void;
   onToggleDir: () => void;
   onOpenDiff: () => void;
+  onContextMenu: (e: MouseEvent) => void;
   onCopyRight: () => void;
   onCopyLeft: () => void;
 }> = (props) => {
@@ -557,6 +798,7 @@ const FolderRow: Component<{
       }`}
       onClick={props.onSelect}
       onDblClick={props.onOpenDiff}
+      onContextMenu={props.onContextMenu}
     >
       <div class="folder-col-left">
         <span class="col-name" style={{ "padding-left": indentPx() }}>
@@ -575,6 +817,11 @@ const FolderRow: Component<{
           <span class={hasLeft() ? "entry-label" : "entry-missing"}>
             {hasLeft() ? props.entry.name : "— (不存在)"}
           </span>
+          <Show when={props.entry.is_dir && props.entry.status === "unknown"}>
+            <span class="uncompared-badge" title="未嵌套比较，右键选择“嵌套比较”或点击展开">
+              未嵌套比较
+            </span>
+          </Show>
         </span>
         <span class="col-size">{formatBytes(props.entry.left_size)}</span>
         <span class="col-time">{formatTime(props.entry.left_modified_ms)}</span>
@@ -600,7 +847,9 @@ const FolderRow: Component<{
             ? "≠"
             : props.entry.status === "left_only"
             ? "←"
-            : "→"}
+            : props.entry.status === "right_only"
+            ? "→"
+            : "~"}
         </span>
         <Show when={!props.entry.is_dir && props.entry.status !== "equal"}>
           <button

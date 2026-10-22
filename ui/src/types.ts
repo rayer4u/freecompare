@@ -119,7 +119,13 @@ export interface ThreeWayDiffResult {
 }
 
 // Folder Compare DTOs
-export type FolderItemStatus = "equal" | "modified" | "left_only" | "right_only";
+export type FolderItemStatus = "equal" | "modified" | "left_only" | "right_only" | "unknown";
+
+export interface FolderSubtreeResult {
+  relative_path: string;
+  entries: FolderEntryDto[];
+  status: FolderItemStatus;
+}
 
 export interface FolderEntryDto {
   relative_path: string;
@@ -170,4 +176,5 @@ export interface WorkspaceTab {
   expandAll?: boolean;
   filters?: string[];
   siblingFiles?: SiblingDiffFileItem[];
+  reviewMode?: boolean;
 }

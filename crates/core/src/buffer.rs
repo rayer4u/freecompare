@@ -95,7 +95,7 @@ impl TextBuffer {
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, BufferError> {
-        let path_buf = path.as_ref().to_path_buf();
+        let path_buf = expand_path(path);
         let bytes = fs::read(&path_buf)?;
         let (decoded, encoding) = decode_bytes(&bytes);
         let line_ending = detect_line_ending(&decoded);
@@ -273,8 +273,8 @@ impl TextBuffer {
 
     /// Saves the buffer back to its file (or a specified target path), preserving original encoding and line endings.
     pub fn save(&mut self, target_path: Option<&Path>) -> Result<(), BufferError> {
-        let out_path = match target_path.or(self.path.as_deref()) {
-            Some(p) => p.to_path_buf(),
+        let out_path = match target_path.map(expand_path).or_else(|| self.path.clone()) {
+            Some(p) => p,
             None => {
                 return Err(BufferError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -282,6 +282,9 @@ impl TextBuffer {
                 )))
             }
         };
+        if let Some(parent) = out_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
 
         let raw_text = self.rope.to_string();
         let text_with_le = match self.line_ending {
@@ -385,4 +388,42 @@ fn detect_line_ending(text: &str) -> LineEnding {
 
 fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Expands user home directory (e.g. `~/path` or `~`) and resolves relative paths to absolute paths.
+pub fn expand_path(path: impl AsRef<Path>) -> PathBuf {
+    let p = path.as_ref();
+    let s = p.to_string_lossy();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+    let expanded = if trimmed == "~" {
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("~"))
+    } else if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            PathBuf::from(home).join(rest)
+        } else {
+            PathBuf::from(trimmed)
+        }
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if expanded.is_relative() {
+        if let Ok(cwd) = std::env::current_dir() {
+            let combined = cwd.join(&expanded);
+            if let Ok(canon) = combined.canonicalize() {
+                return canon;
+            }
+            return combined;
+        }
+    } else if let Ok(canon) = expanded.canonicalize() {
+        return canon;
+    }
+
+    expanded
 }

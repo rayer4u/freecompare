@@ -262,3 +262,28 @@ fn test_git_builtin_bc_difftool_and_mergetool_drop_in_replacement() {
         assert!(entry["right_size"].as_u64().unwrap() > 0);
     }
 }
+
+#[test]
+fn test_read_text_file_and_expand_path() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("sample.txt");
+    fs::write(&file_path, "line 1\nline 2\r\nline 3\n").unwrap();
+
+    let backend = AppBackend::new();
+    let res = backend
+        .dispatch_rpc(
+            "read_text_file",
+            &json!({
+                "path": file_path.to_string_lossy()
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(res["line_count"], 3);
+    assert_eq!(res["content"], "line 1\nline 2\nline 3\n");
+    assert_eq!(res["encoding"], "UTF-8");
+
+    // Verify expand_path works with ~
+    let expanded = freecompare_core::expand_path("~/");
+    assert!(expanded.is_absolute());
+}

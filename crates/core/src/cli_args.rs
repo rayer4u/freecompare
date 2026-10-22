@@ -96,6 +96,9 @@ pub struct CliInvocation {
     pub print_git_config: bool,
     pub install_git_config: bool,
 
+    /// Code review / guard mode flag (shows Approve/Reject actions in UI).
+    pub review_mode: bool,
+
     /// Internal server flags (`--port`, `--no-open`).
     pub port_override: Option<u16>,
     pub no_open_window: bool,
@@ -145,6 +148,9 @@ impl CliInvocation {
                     }
                     "cli" | "summary" => {
                         inv.cli_summary = true;
+                    }
+                    "review" | "guard" => {
+                        inv.review_mode = true;
                     }
                     "no-open" | "headless" => {
                         inv.no_open_window = true;

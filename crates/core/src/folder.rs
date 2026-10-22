@@ -15,8 +15,14 @@ pub enum FolderCompareMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderCompareOptions {
     pub mode: FolderCompareMode,
+    #[serde(default)]
     pub ignore_case_names: bool,
+    #[serde(default)]
     pub exclude_globs: Vec<String>,
+    #[serde(default)]
+    pub recursive: bool,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 impl Default for FolderCompareOptions {
@@ -30,6 +36,8 @@ impl Default for FolderCompareOptions {
                 "target".to_string(),
                 ".DS_Store".to_string(),
             ],
+            recursive: false,
+            max_depth: None,
         }
     }
 }
@@ -41,6 +49,14 @@ pub enum FolderItemStatus {
     Modified,
     LeftOnly,
     RightOnly,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderSubtreeResult {
+    pub relative_path: String,
+    pub entries: Vec<FolderEntryDto>,
+    pub status: FolderItemStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +141,62 @@ pub fn compare_folders(
     })
 }
 
+pub fn compare_subfolder(
+    left_root: impl AsRef<Path>,
+    right_root: impl AsRef<Path>,
+    sub_rel: &str,
+    options: &FolderCompareOptions,
+) -> std::io::Result<FolderSubtreeResult> {
+    let left_base = left_root.as_ref();
+    let right_base = right_root.as_ref();
+    let glob_set = build_exclude_globset(&options.exclude_globs);
+
+    let clean_rel = sub_rel.trim_matches('/').replace('\\', "/");
+    let rel_path = PathBuf::from(&clean_rel);
+
+    let base_depth = clean_rel.split('/').filter(|s| !s.is_empty()).count();
+
+    let mut entries = Vec::new();
+    let mut stats = FolderDiffStats::default();
+
+    let mut sub_opts = options.clone();
+    sub_opts.recursive = true;
+
+    compare_dir_recursive(
+        left_base,
+        right_base,
+        &rel_path,
+        base_depth,
+        &sub_opts,
+        &glob_set,
+        &mut entries,
+        &mut stats,
+    )?;
+
+    let has_diff = entries.iter().any(|e| e.status != FolderItemStatus::Equal);
+    let l_exists = left_base.join(&rel_path).exists();
+    let r_exists = right_base.join(&rel_path).exists();
+
+    let status = match (l_exists, r_exists) {
+        (true, true) => {
+            if has_diff {
+                FolderItemStatus::Modified
+            } else {
+                FolderItemStatus::Equal
+            }
+        }
+        (true, false) => FolderItemStatus::LeftOnly,
+        (false, true) => FolderItemStatus::RightOnly,
+        (false, false) => FolderItemStatus::Equal,
+    };
+
+    Ok(FolderSubtreeResult {
+        relative_path: clean_rel,
+        entries,
+        status,
+    })
+}
+
 #[derive(Clone)]
 struct LocalMeta {
     name: String,
@@ -197,8 +269,17 @@ fn compare_dir_recursive(
 
         if is_dir {
             let dir_idx = out.len();
+            let should_recurse =
+                options.recursive || options.max_depth.map_or(false, |md| depth < md);
+
             let initial_status = match (l_meta.is_some(), r_meta.is_some()) {
-                (true, true) => FolderItemStatus::Equal,
+                (true, true) => {
+                    if should_recurse {
+                        FolderItemStatus::Equal
+                    } else {
+                        FolderItemStatus::Unknown
+                    }
+                }
                 (true, false) => FolderItemStatus::LeftOnly,
                 (false, true) => FolderItemStatus::RightOnly,
                 (false, false) => FolderItemStatus::Equal,
@@ -216,25 +297,27 @@ fn compare_dir_recursive(
                 right_modified_ms: r_meta.map(|m| m.modified_ms),
             });
 
-            let child_start = out.len();
-            compare_dir_recursive(
-                left_root,
-                right_root,
-                &child_rel,
-                depth + 1,
-                options,
-                glob_set,
-                out,
-                stats,
-            )?;
+            if should_recurse {
+                let child_start = out.len();
+                compare_dir_recursive(
+                    left_root,
+                    right_root,
+                    &child_rel,
+                    depth + 1,
+                    options,
+                    glob_set,
+                    out,
+                    stats,
+                )?;
 
-            // Propagate child differences upward to parent directory status
-            if initial_status == FolderItemStatus::Equal {
-                let has_diff_child = out[child_start..]
-                    .iter()
-                    .any(|c| c.status != FolderItemStatus::Equal);
-                if has_diff_child {
-                    out[dir_idx].status = FolderItemStatus::Modified;
+                // Propagate child differences upward to parent directory status
+                if initial_status == FolderItemStatus::Equal {
+                    let has_diff_child = out[child_start..]
+                        .iter()
+                        .any(|c| c.status != FolderItemStatus::Equal);
+                    if has_diff_child {
+                        out[dir_idx].status = FolderItemStatus::Modified;
+                    }
                 }
             }
         } else {

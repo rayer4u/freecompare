@@ -2,6 +2,7 @@ import { Component, createMemo, createSignal, onCleanup, onMount, Show, For } fr
 import {
   callRustRpc,
   CompareBackendClient,
+  ReadTextFileResult,
   UserPreferencesDto,
   ViewRowFilter,
 } from "../bridge";
@@ -26,6 +27,7 @@ interface TextDiffViewProps {
   leftReadonly?: boolean;
   rightReadonly?: boolean;
   siblingFiles?: SiblingDiffFileItem[];
+  reviewMode?: boolean;
   onCloseOrExit?: () => void;
   onUpdateTabTitle?: (newTitle: string) => void;
 }
@@ -66,6 +68,42 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       return;
     }
     props.onCloseOrExit?.();
+  };
+
+  const handleApproveReview = async () => {
+    await callRustRpc("set_process_exit_code", { code: 0 });
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify({ immediate: true }),
+    }).catch(() => {});
+    setTimeout(() => window.close(), 80);
+  };
+
+  const handleRejectReview = async () => {
+    await callRustRpc("set_process_exit_code", { code: 1 });
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify({ immediate: true }),
+    }).catch(() => {});
+    setTimeout(() => window.close(), 80);
+  };
+
+  const isReviewMode = () => {
+    if (props.reviewMode) return true;
+    const lt = props.leftTitle ?? "";
+    const rt = props.rightTitle ?? "";
+    const lp = leftPath();
+    const rp = rightPath();
+    return (
+      lt.includes("当前文件") ||
+      lt.includes("Current") ||
+      rt.includes("AI 拟修改") ||
+      rt.includes("Proposed") ||
+      lp.includes("fcompare-guard") ||
+      rp.includes("fcompare-guard") ||
+      lp.includes("CURRENT_") ||
+      rp.includes("PROPOSED_")
+    );
   };
 
   const currentSiblingIdx = createMemo(() => {
@@ -331,28 +369,25 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       return;
     }
 
-    // Load single side by comparing against self and extracting its lines
+    // Load single side directly using full-fidelity read_text_file
     try {
-      const data = await callRustRpc<{
-        initial_slice: { rows: ViewportRowDto[] };
-      }>("open_two_way_files", {
-        left_path: trimmed,
-        right_path: trimmed,
-        options: options(),
-        initial_row_count: 50000,
+      const res = await callRustRpc<ReadTextFileResult>("read_text_file", {
+        path: trimmed,
       });
-      if (data) {
-        const text = data.initial_slice.rows
-          .map((r) => r.left_text ?? "")
-          .join("\n");
+      if (res) {
+        if (isLeft) setLeftPath(res.path);
+        else setRightPath(res.path);
+
         const nextSummary = CompareBackendClient.replaceSideText(
           props.sessionId,
           isLeft,
-          text
+          res.content
         );
         setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
         setVersionTick((t) => t + 1);
-        showToast(`已加载文件: ${trimmed} (${nextSummary.left_line_count} 行)`);
+        showToast(`已加载文件: ${res.path} (${res.line_count} 行, ${res.encoding})`);
+      } else {
+        showToast(`无法读取本地文件: ${trimmed}`);
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
@@ -430,6 +465,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         return;
       }
       e.preventDefault();
+      if (e.shiftKey) {
+        handleRejectReview();
+        return;
+      }
+      if (isReviewMode()) {
+        handleApproveReview();
+        return;
+      }
       tryCloseOrExit();
       return;
     }
@@ -873,13 +916,15 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <span class="stat-pill ins">新增块: {summary().stats.inserted_hunks}</span>
           <span class="stat-pill del">删除块: {summary().stats.deleted_hunks}</span>
           <span class="stat-pill eq">相同行: {summary().stats.equal_lines}</span>
-          <button
-            class="bc-tool-btn"
-            onClick={tryCloseOrExit}
-            title="Beyond Compare 风格 Esc 退出当前对比，自动进入 Git 队列下一个文件或返回目录列表 (Esc / q / Ctrl+W)"
-          >
-            ⏭️ 下个文件/退出 (Esc)
-          </button>
+          <Show when={!isReviewMode()}>
+            <button
+              class="bc-tool-btn"
+              onClick={tryCloseOrExit}
+              title="Beyond Compare 风格 Esc 退出当前对比，自动进入 Git 队列下一个文件或返回目录列表 (Esc / q / Ctrl+W)"
+            >
+              ⏭️ 下个文件/退出 (Esc)
+            </button>
+          </Show>
         </div>
       </div>
 
@@ -904,6 +949,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             onKeyDown={(e) =>
               e.key === "Enter" && handleLoadSingleDiskFile(true, leftPath())
             }
+            onBlur={() => {
+              const p = leftPath().trim();
+              if (p && !p.startsWith("(") && !summary().left_dirty) {
+                handleLoadSingleDiskFile(true, p);
+              }
+            }}
           />
           <datalist id={`mru-left-${props.sessionId}`}>
             <For each={recentLeftPaths()}>{(p) => <option value={p} />}</For>
@@ -954,6 +1005,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             onKeyDown={(e) =>
               e.key === "Enter" && handleLoadSingleDiskFile(false, rightPath())
             }
+            onBlur={() => {
+              const p = rightPath().trim();
+              if (p && !p.startsWith("(") && !summary().right_dirty) {
+                handleLoadSingleDiskFile(false, p);
+              }
+            }}
           />
           <datalist id={`mru-right-${props.sessionId}`}>
             <For each={recentRightPaths()}>{(p) => <option value={p} />}</For>
