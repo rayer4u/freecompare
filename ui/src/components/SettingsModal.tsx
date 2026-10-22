@@ -1,5 +1,5 @@
 import { Component, createSignal, For, onMount, Show } from "solid-js";
-import { callRustRpc, UserPreferencesDto } from "../bridge";
+import { AppInfoDto, callRustRpc, UserPreferencesDto } from "../bridge";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -7,8 +7,9 @@ interface SettingsModalProps {
 }
 
 export const SettingsModal: Component<SettingsModalProps> = (props) => {
-  const [activeTab, setActiveTab] = createSignal<"editor" | "diff" | "folder" | "git">("editor");
+  const [activeTab, setActiveTab] = createSignal<"editor" | "diff" | "folder" | "git" | "about">("editor");
   const [prefs, setPrefs] = createSignal<UserPreferencesDto | null>(null);
+  const [appInfo, setAppInfo] = createSignal<AppInfoDto | null>(null);
   const [globsInput, setGlobsInput] = createSignal("");
   const [toast, setToast] = createSignal<string | null>(null);
 
@@ -22,6 +23,10 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     if (data) {
       setPrefs(data);
       setGlobsInput((data.folder_exclude_globs || []).join(", "));
+    }
+    const info = await callRustRpc<AppInfoDto>("get_app_info");
+    if (info) {
+      setAppInfo(info);
     }
   });
 
@@ -126,6 +131,12 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
               onClick={() => setActiveTab("git")}
             >
               🔧 Git 与系统
+            </button>
+            <button
+              class={`settings-nav-btn ${activeTab() === "about" ? "active" : ""}`}
+              onClick={() => setActiveTab("about")}
+            >
+              ℹ️ 关于与版本
             </button>
           </div>
 
@@ -328,6 +339,105 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                           🔄 恢复出厂默认设置
                         </button>
                       </div>
+                    </div>
+                  </Show>
+
+                  {/* Tab 5: About & Diagnostics */}
+                  <Show when={activeTab() === "about"}>
+                    <div class="settings-group">
+                      <h4 class="settings-title">FreeCompare 版本与执行程序诊断</h4>
+                      <Show
+                        when={appInfo()}
+                        fallback={<p style={{ "font-size": "12px", opacity: "0.8" }}>正在加载版本信息...</p>}
+                      >
+                        {(info) => (
+                          <div style={{ display: "flex", "flex-direction": "column", gap: "12px", "margin-top": "12px" }}>
+                            <div>
+                              <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
+                                应用版本
+                              </div>
+                              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                                <span style={{ "font-weight": "bold", "font-size": "14px" }}>v{info().version}</span>
+                                <span class="about-tag">
+                                  {info().build_profile === "release" ? "正式版 Release" : "调试版 Debug"}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
+                                Git 提交 Hash
+                              </div>
+                              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                                <code class="about-code-block" style={{ "max-width": "120px" }}>
+                                  {info().git_hash_short}
+                                </code>
+                                <button
+                                  class="about-copy-btn"
+                                  onClick={async () => {
+                                    await navigator.clipboard.writeText(info().git_hash);
+                                    notify("已复制完整 Git Hash");
+                                  }}
+                                >
+                                  📋 复制完整 Hash
+                                </button>
+                                <Show when={info().git_dirty}>
+                                  <span class="about-dirty-tag">dirty</span>
+                                </Show>
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
+                                🎯 正在调用的二进制文件路径 (Binary Path)
+                              </div>
+                              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                                <code class="about-code-block binary-path-block" style={{ flex: "1" }}>
+                                  {info().binary_path}
+                                </code>
+                                <button
+                                  class="about-copy-btn"
+                                  onClick={async () => {
+                                    await navigator.clipboard.writeText(info().binary_path);
+                                    notify("已复制二进制路径");
+                                  }}
+                                >
+                                  📋 复制路径
+                                </button>
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ "font-size": "12px", color: "var(--text-secondary)", "margin-bottom": "4px" }}>
+                                目标架构
+                              </div>
+                              <span style={{ "font-family": "monospace", "font-size": "12.5px" }}>
+                                {info().target_triple}
+                              </span>
+                            </div>
+
+                            <div style={{ "margin-top": "10px" }}>
+                              <button
+                                class="bc-tool-btn"
+                                onClick={async () => {
+                                  const text = [
+                                    `Application: ${info().name}`,
+                                    `Version: v${info().version}`,
+                                    `Git Commit: ${info().git_hash}${info().git_dirty ? " (dirty)" : ""}`,
+                                    `Binary Executable: ${info().binary_path}`,
+                                    `Target Triple: ${info().target_triple}`,
+                                    `Build Profile: ${info().build_profile}`,
+                                  ].join("\n");
+                                  await navigator.clipboard.writeText(text);
+                                  notify("已复制全部诊断信息");
+                                }}
+                              >
+                                📋 复制全部诊断信息
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </Show>
                     </div>
                   </Show>
                 </>

@@ -287,3 +287,22 @@ fn test_read_text_file_and_expand_path() {
     let expanded = freecompare_core::expand_path("~/");
     assert!(expanded.is_absolute());
 }
+
+#[test]
+fn test_get_app_info_returns_version_hash_and_binary_path() {
+    let backend = AppBackend::new();
+    let res = backend.dispatch_rpc("get_app_info", &json!({})).unwrap();
+
+    assert_eq!(res["name"], "FreeCompare");
+    assert!(!res["version"].as_str().unwrap().is_empty());
+    assert!(!res["git_hash"].as_str().unwrap().is_empty());
+    assert!(!res["git_hash_short"].as_str().unwrap().is_empty());
+    assert!(!res["binary_path"].as_str().unwrap().is_empty());
+    assert!(!res["target_triple"].as_str().unwrap().is_empty());
+    assert!(res["build_profile"] == "debug" || res["build_profile"] == "release");
+
+    let direct_info = freecompare_app_lib::get_app_info();
+    assert_eq!(direct_info.name, "FreeCompare");
+    assert_eq!(direct_info.version, res["version"].as_str().unwrap());
+    assert_eq!(direct_info.git_hash, res["git_hash"].as_str().unwrap());
+}

@@ -64,6 +64,34 @@ pub struct FsListResponse {
     pub entries: Vec<FsEntryDto>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfoDto {
+    pub name: String,
+    pub version: String,
+    pub git_hash: String,
+    pub git_hash_short: String,
+    pub git_dirty: bool,
+    pub binary_path: String,
+    pub target_triple: String,
+    pub build_profile: String,
+}
+
+pub fn get_app_info() -> AppInfoDto {
+    let binary_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    AppInfoDto {
+        name: "FreeCompare".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_hash: env!("FC_GIT_HASH").to_string(),
+        git_hash_short: env!("FC_GIT_HASH_SHORT").to_string(),
+        git_dirty: env!("FC_GIT_DIRTY") == "true",
+        binary_path,
+        target_triple: env!("FC_TARGET_TRIPLE").to_string(),
+        build_profile: if cfg!(debug_assertions) { "debug" } else { "release" }.to_string(),
+    }
+}
+
 pub struct AppBackend {
     pub manager: SessionManager,
     pub exit_code: AtomicI32,
@@ -771,6 +799,7 @@ impl AppBackend {
     /// Unified JSON RPC dispatcher used by both Tauri IPC and the `fc` CLI UI Server.
     pub fn dispatch_rpc(&self, cmd: &str, args: &Value) -> Result<Value, String> {
         match cmd {
+            "get_app_info" => Ok(json!(get_app_info())),
             "get_startup_session" => Ok(json!(self.get_startup_session())),
             "get_recent_sessions" => Ok(json!(self.get_recent_sessions())),
             "clear_recent_sessions" => {

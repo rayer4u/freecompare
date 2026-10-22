@@ -91,8 +91,9 @@ pub struct CliInvocation {
     /// `-fv` / `-fileviewer=<type>`: Force a specific view type even with 0 or 1 path.
     pub forced_viewer: Option<ForcedViewerKind>,
 
-    /// Help or Git integration installer flags.
+    /// Help, version or Git integration installer flags.
     pub show_help: bool,
+    pub show_version: bool,
     pub print_git_config: bool,
     pub install_git_config: bool,
 
@@ -139,6 +140,9 @@ impl CliInvocation {
                 match key.as_str() {
                     "h" | "help" | "?" => {
                         inv.show_help = true;
+                    }
+                    "v" | "version" => {
+                        inv.show_version = true;
                     }
                     "git-config" => {
                         inv.print_git_config = true;
@@ -384,6 +388,8 @@ fn is_known_slash_flag(rest: &str) -> bool {
         "h"
             | "help"
             | "?"
+            | "v"
+            | "version"
             | "ro"
             | "ro1"
             | "ro2"

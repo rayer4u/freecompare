@@ -73,6 +73,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if inv.show_version {
+        let info = freecompare_app_lib::get_app_info();
+        println!("{} v{} (git: {}, profile: {})", info.name, info.version, info.git_hash_short, info.build_profile);
+        println!("Binary: {}", info.binary_path);
+        println!("Commit: {}", info.git_hash);
+        println!("Target: {}", info.target_triple);
+        return Ok(());
+    }
+
     if inv.print_git_config || inv.install_git_config {
         return handle_git_integration(inv.install_git_config);
     }
@@ -229,6 +238,7 @@ fn print_help() {
     println!("  -filters=<globs>                       Semicolon-separated filter rules");
     println!("  -solo, -wait / -nowait                 Wait for UI window closure (default: wait)");
     println!("  -review                                Enable Review Mode (Approve/Reject actions & exit codes)");
+    println!("  -v, --version                          Print version, git commit hash, binary path & exit");
     println!("  --git-config / --install-git           Print or install global Git difftool/mergetool config");
     println!("  guard                                  Act as Antigravity CLI lifecycle guard for diff review");
 }

@@ -99,3 +99,15 @@ fn test_cli_quickcompare_optional_value_and_required_paths_validation() {
     assert_eq!(inv_fv.forced_viewer, Some(ForcedViewerKind::TextMerge));
     assert_eq!(exit_codes::IMPORTANT_DIFF, 12);
 }
+
+#[test]
+fn test_cli_version_flag() {
+    let inv_v = CliInvocation::parse(["-v"]).unwrap();
+    assert!(inv_v.show_version);
+
+    let inv_version = CliInvocation::parse(["--version"]).unwrap();
+    assert!(inv_version.show_version);
+
+    let inv_slash = CliInvocation::parse(["/version"]).unwrap();
+    assert!(inv_slash.show_version);
+}

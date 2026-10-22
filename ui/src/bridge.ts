@@ -61,6 +61,17 @@ export interface ReadTextFileResult {
   encoding: string;
 }
 
+export interface AppInfoDto {
+  name: string;
+  version: string;
+  git_hash: string;
+  git_hash_short: string;
+  git_dirty: boolean;
+  binary_path: string;
+  target_triple: string;
+  build_profile: string;
+}
+
 export interface UserPreferencesDto {
   theme: "dark" | "light";
   ignore_whitespace: boolean;

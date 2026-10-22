@@ -3,6 +3,7 @@ name = "freecompare-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lib]
 name = "freecompare_app_lib"

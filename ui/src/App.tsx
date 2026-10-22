@@ -6,10 +6,12 @@ import { TextDiffView } from "./views/TextDiffView";
 import { FolderDiffView } from "./views/FolderDiffView";
 import { Merge3WayView } from "./views/Merge3WayView";
 import { SettingsModal } from "./components/SettingsModal";
+import { AboutModal } from "./components/AboutModal";
 
 export const App: Component = () => {
   const [theme, setTheme] = createSignal<"dark" | "light">("dark");
   const [showSettings, setShowSettings] = createSignal(false);
+  const [showAbout, setShowAbout] = createSignal(false);
   // Start cleanly on the Home tab without any pre-populated fake demo tabs!
   const [tabs, setTabs] = createSignal<WorkspaceTab[]>([
     { id: "tab-home", title: "🏠 新建会话", kind: "home" },
@@ -353,6 +355,13 @@ export const App: Component = () => {
           </span>
           <button
             class="theme-toggle-btn"
+            onClick={() => setShowAbout(true)}
+            title="关于 FreeCompare (查看版本、Git Commit 与运行程序路径)"
+          >
+            ℹ️ 关于
+          </button>
+          <button
+            class="theme-toggle-btn"
             onClick={() => setShowSettings(true)}
             title="偏好设置 (Ctrl+,)"
           >
@@ -462,6 +471,10 @@ export const App: Component = () => {
             }
           }}
         />
+      </Show>
+
+      <Show when={showAbout()}>
+        <AboutModal onClose={() => setShowAbout(false)} />
       </Show>
     </div>
   );
