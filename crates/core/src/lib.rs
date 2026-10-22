@@ -10,7 +10,7 @@ pub mod folder;
 pub mod session;
 pub mod syntax;
 
-pub use buffer::{EncodingKind, LineEnding, TextBuffer};
+pub use buffer::{expand_path, EncodingKind, LineEnding, TextBuffer};
 pub use cli_args::{
     exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode,
 };
@@ -22,8 +22,9 @@ pub use diff::{
     },
 };
 pub use folder::{
-    FolderCompareMode, FolderCompareOptions, FolderDiffResult, FolderEntryDto, FolderItemStatus,
-    FolderSyncAction, FolderSyncActionKind, FolderSyncPlan,
+    compare_folders, compare_subfolder, FolderCompareMode, FolderCompareOptions, FolderDiffResult,
+    FolderEntryDto, FolderItemStatus, FolderSubtreeResult, FolderSyncAction, FolderSyncActionKind,
+    FolderSyncPlan,
 };
 pub use session::{
     SessionKind, SessionManager, SessionRecord, StartupLaunchSession, UserPreferences,

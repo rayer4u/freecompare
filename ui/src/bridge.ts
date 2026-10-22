@@ -40,6 +40,7 @@ export interface StartupLaunchSessionDto {
   readonly: [boolean, boolean, boolean];
   expand_all: boolean;
   filters: string[];
+  review_mode: boolean;
 }
 
 export interface SessionRecordDto {
@@ -51,6 +52,13 @@ export interface SessionRecordDto {
   base_path: string | null;
   output_path: string | null;
   updated_at_ms: number;
+}
+
+export interface ReadTextFileResult {
+  content: string;
+  path: string;
+  line_count: number;
+  encoding: string;
 }
 
 export interface UserPreferencesDto {
@@ -733,50 +741,19 @@ export class CompareBackendClient {
     rightPath: string,
     options: DiffOptions
   ): Promise<TwoWayDiffResult | null> {
-    const data = await callRustRpc<{
-      session_id: string;
-      left_path: string;
-      right_path: string;
-      summary: TwoWayDiffResult;
-      initial_slice: ViewportSliceDto;
-    }>("open_two_way_files", {
-      left_path: leftPath,
-      right_path: rightPath,
-      options,
-      initial_row_count: 50000,
-    });
+    const [leftRes, rightRes] = await Promise.all([
+      callRustRpc<ReadTextFileResult>("read_text_file", { path: leftPath }),
+      callRustRpc<ReadTextFileResult>("read_text_file", { path: rightPath }),
+    ]);
 
-    if (!data) return null;
+    if (!leftRes || !rightRes) return null;
 
-    const leftLines: string[] = [];
-    const rightLines: string[] = [];
-    for (const r of data.initial_slice.rows) {
-      if (r.left_text !== null && r.left_text !== undefined) {
-        leftLines.push(r.left_text);
-      }
-      if (r.right_text !== null && r.right_text !== undefined) {
-        rightLines.push(r.right_text);
-      }
-    }
-
-    localTwoWayStore.set(sessionId, {
-      leftLines,
-      rightLines,
-      leftUndo: [],
-      rightUndo: [],
-      leftRedo: [],
-      rightRedo: [],
-      leftDirty: data.summary.left_dirty,
-      rightDirty: data.summary.right_dirty,
-      options,
-      rowFilter: "all",
-      allRows: data.initial_slice.rows,
-      visibleRows: data.initial_slice.rows,
-      hunks: data.summary.hunks,
-      stats: data.summary.stats,
-    });
-
-    return data.summary;
+    return CompareBackendClient.createTwoWaySession(
+      sessionId,
+      leftRes.content,
+      rightRes.content,
+      options
+    );
   }
 }
 

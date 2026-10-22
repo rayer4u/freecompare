@@ -139,6 +139,7 @@ export const App: Component = () => {
         readonly: startup.readonly,
         expandAll: startup.expand_all,
         filters: startup.filters,
+        reviewMode: startup.review_mode,
       };
       if (startup.kind === "folder_compare") {
         launchSession(
@@ -170,7 +171,33 @@ export const App: Component = () => {
       }
     }
 
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const target = e.target as HTMLElement | null;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === "Escape") {
+        const tab = activeTab();
+        const inReview = Boolean(
+          tab?.reviewMode ||
+          tab?.titles?.[0]?.includes("当前文件") ||
+          tab?.titles?.[1]?.includes("AI 拟修改") ||
+          tab?.title?.includes("AI 拟修改")
+        );
+        if (inReview) {
+          e.preventDefault();
+          if (e.shiftKey) {
+            handleRejectActiveSession();
+          } else {
+            handleApproveActiveSession();
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+
     return () => {
+      window.removeEventListener("keydown", handleGlobalKeyDown);
       window.clearInterval(heartbeatTimer);
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("pagehide", handlePageHide);
@@ -209,6 +236,24 @@ export const App: Component = () => {
     }
 
     // Otherwise exit the process & close window immediately (saving window geometry in the same call) so `git difftool` advances to the next file!
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify(collectWindowGeometry(true)),
+    }).catch(() => {});
+    window.close();
+  };
+
+  const handleApproveActiveSession = async () => {
+    await callRustRpc("set_process_exit_code", { code: 0 });
+    await fetch("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify(collectWindowGeometry(true)),
+    }).catch(() => {});
+    window.close();
+  };
+
+  const handleRejectActiveSession = async () => {
+    await callRustRpc("set_process_exit_code", { code: 1 });
     await fetch("/api/shutdown", {
       method: "POST",
       body: JSON.stringify(collectWindowGeometry(true)),
@@ -260,6 +305,49 @@ export const App: Component = () => {
         </div>
 
         <div class="app-header-right">
+          <Show
+            when={(() => {
+              const tab = activeTab();
+              if (!tab) return false;
+              if (tab.reviewMode) return true;
+              const t0 = tab.titles?.[0] ?? "";
+              const t1 = tab.titles?.[1] ?? "";
+              const title = tab.title ?? "";
+              const lp = tab.leftPath ?? "";
+              const rp = tab.rightPath ?? "";
+              return (
+                title.includes("AI 拟修改") ||
+                title.includes("Proposed") ||
+                title.includes("当前文件") ||
+                t0.includes("当前文件") ||
+                t1.includes("AI 拟修改") ||
+                lp.includes("fcompare-guard") ||
+                rp.includes("fcompare-guard") ||
+                lp.includes("CURRENT_") ||
+                rp.includes("PROPOSED_")
+              );
+            })()}
+          >
+            <div class="header-review-group">
+              <span class="header-review-tag">🛡️ 审查模式</span>
+              <button
+                class="header-review-btn approve"
+                onClick={handleApproveActiveSession}
+                title="通过本次代码审查并允许写入磁盘 (Esc / Exit Code: 0)"
+              >
+                ✅ 通过审查 (Esc)
+              </button>
+              <button
+                class="header-review-btn reject"
+                onClick={handleRejectActiveSession}
+                title="拒绝本次代码修改并拦截 AI 写入 (Shift+Esc / Exit Code: 1)"
+              >
+                ❌ 拒绝修改 (Shift+Esc)
+              </button>
+            </div>
+            <div class="header-divider" />
+          </Show>
+
           <span class="shortcut-hint">
             Esc 下个文件/退回 · Alt+↑/↓ (或 n/p) 跳差异 · [/] 切上/下文件 · Ctrl+B 文件列表 · Ctrl+, 设置
           </span>
@@ -302,6 +390,7 @@ export const App: Component = () => {
               leftReadonly={activeTab().readonly?.[0]}
               rightReadonly={activeTab().readonly?.[1]}
               siblingFiles={activeTab().siblingFiles}
+              reviewMode={activeTab().reviewMode}
               onCloseOrExit={handleCloseOrExitActiveSession}
               onUpdateTabTitle={(newTitle) => {
                 const curId = activeTab().id;
@@ -317,6 +406,7 @@ export const App: Component = () => {
             <FolderDiffView
               initialLeftDir={activeTab().leftPath}
               initialRightDir={activeTab().rightPath}
+              expandAll={activeTab().expandAll}
               onCloseOrExit={handleCloseOrExitActiveSession}
               onOpenFileDiff={(leftFullPath, rightFullPath, relPath, siblingFiles) =>
                 launchSession(
@@ -326,6 +416,14 @@ export const App: Component = () => {
                   rightFullPath,
                   undefined,
                   { siblingFiles }
+                )
+              }
+              onOpenFolderDiff={(leftFullPath, rightFullPath, relPath) =>
+                launchSession(
+                  "folder",
+                  relPath.split("/").pop() ?? relPath,
+                  leftFullPath,
+                  rightFullPath
                 )
               }
             />

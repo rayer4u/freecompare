@@ -2,6 +2,7 @@ use anyhow::Result;
 use freecompare_app_lib::AppBackend;
 use freecompare_core::{
     cli_args::{exit_codes, CliInvocation},
+    expand_path,
     folder::{compare_folders, FolderCompareOptions},
     DiffOptions, ThreeWaySession, TwoWaySession, UserPreferences,
 };
@@ -50,6 +51,14 @@ fn now_ms() -> u64 {
 
 fn main() -> Result<()> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
+
+    // Built-in Antigravity CLI lifecycle guard for cross-platform visual review
+    if raw_args.first().map(|s| s.as_str()) == Some("guard")
+        || raw_args.first().map(|s| s.as_str()) == Some("agy-guard")
+        || raw_args.iter().any(|s| s == "--guard" || s == "-guard")
+    {
+        return execute_guard_mode();
+    }
 
     let inv = match CliInvocation::parse(&raw_args) {
         Ok(parsed) => parsed,
@@ -188,7 +197,10 @@ fn main() -> Result<()> {
 }
 
 fn print_help() {
-    println!("FreeCompare (fcompare) v0.1.0 — Beyond Compare & Git Compatible Diff/Merge Tool");
+    println!(
+        "FreeCompare (fcompare) v{} — Beyond Compare & Git Compatible Diff/Merge Tool",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("USAGE:");
     println!("  fcompare [options] [<left> [<right> [<center/base> [<output>]]]]");
@@ -216,7 +228,175 @@ fn print_help() {
     println!("  -expandall                             Expand all subfolders initially");
     println!("  -filters=<globs>                       Semicolon-separated filter rules");
     println!("  -solo, -wait / -nowait                 Wait for UI window closure (default: wait)");
+    println!("  -review                                Enable Review Mode (Approve/Reject actions & exit codes)");
     println!("  --git-config / --install-git           Print or install global Git difftool/mergetool config");
+    println!("  guard                                  Act as Antigravity CLI lifecycle guard for diff review");
+}
+
+fn is_guard_disabled_in_hooks_json() -> bool {
+    let mut cur = env::current_dir().ok();
+    while let Some(dir) = cur {
+        let hook_file = dir.join(".agents").join("hooks.json");
+        if hook_file.is_file() {
+            if let Ok(content) = fs::read_to_string(&hook_file) {
+                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                    if let Some(guard_obj) = val.get("fcompare-guard") {
+                        if guard_obj.get("enabled").and_then(|e| e.as_bool()) == Some(false) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        cur = dir.parent().map(|p| p.to_path_buf());
+    }
+    false
+}
+
+/// Natively executes cross-platform Antigravity (agy) PreToolUse code change review.
+/// Eliminates all Bash / jq / cmp shell dependencies for 100% native execution on Windows, macOS, and Linux.
+fn execute_guard_mode() -> Result<()> {
+    if env::var("FCOMPARE_GUARD_DISABLED").map(|v| v == "1" || v == "true").unwrap_or(false)
+        || is_guard_disabled_in_hooks_json()
+    {
+        println!("{}", json!({ "decision": "allow" }));
+        return Ok(());
+    }
+
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+
+    if input.trim().is_empty() {
+        println!("{}", json!({ "decision": "allow" }));
+        return Ok(());
+    }
+
+    let payload: Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("{}", json!({ "decision": "allow" }));
+            return Ok(());
+        }
+    };
+
+    let tool_name = payload["toolCall"]["name"].as_str().unwrap_or("");
+    let target_path_str = payload["toolCall"]["args"]["Path"].as_str().unwrap_or("");
+
+    if target_path_str.is_empty() {
+        println!("{}", json!({ "decision": "allow" }));
+        return Ok(());
+    }
+
+    // Skip internal system logs, git internals, transcripts, and agent configs
+    let norm = target_path_str.replace('\\', "/");
+    if norm.contains(".system_generated")
+        || norm.contains(".gemini")
+        || norm.contains("/tmp/")
+        || norm.contains(".git/")
+        || norm.contains(".agents/")
+    {
+        println!("{}", json!({ "decision": "allow" }));
+        return Ok(());
+    }
+
+    let target_path = expand_path(target_path_str);
+
+    let old_content = if target_path.is_file() {
+        fs::read_to_string(&target_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let new_content = match tool_name {
+        "write_file" => {
+            let content = payload["toolCall"]["args"]["Content"]
+                .as_str()
+                .unwrap_or("");
+            let append = payload["toolCall"]["args"]["Append"]
+                .as_bool()
+                .unwrap_or(false);
+            if append && target_path.is_file() {
+                format!("{}{}", old_content, content)
+            } else {
+                content.to_string()
+            }
+        }
+        "edit_file" => {
+            let target = payload["toolCall"]["args"]["Target"].as_str().unwrap_or("");
+            let replacement = payload["toolCall"]["args"]["Replacement"]
+                .as_str()
+                .unwrap_or("");
+            if target.is_empty() {
+                old_content.clone()
+            } else {
+                old_content.replace(target, replacement)
+            }
+        }
+        _ => {
+            println!("{}", json!({ "decision": "allow" }));
+            return Ok(());
+        }
+    };
+
+    if old_content == new_content {
+        println!("{}", json!({ "decision": "allow" }));
+        return Ok(());
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("fcompare-guard-{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp_dir);
+
+    let file_name = target_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    let old_file = temp_dir.join(format!("CURRENT_{}", file_name));
+    let new_file = temp_dir.join(format!("PROPOSED_{}", file_name));
+
+    let _ = fs::write(&old_file, old_content.as_bytes());
+    let _ = fs::write(&new_file, new_content.as_bytes());
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fcompare"));
+    let title1 = format!("当前文件 (Current): {}", file_name);
+    let title2 = format!("AI 拟修改 (Proposed): {}", file_name);
+
+    let status = Command::new(&exe)
+        .arg("-review")
+        .arg("-ro1")
+        .arg(format!("-title1={}", title1))
+        .arg(format!("-title2={}", title2))
+        .arg(&old_file)
+        .arg(&new_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    match status {
+        Ok(s) if s.success() => {
+            println!(
+                "{}",
+                json!({
+                    "decision": "allow",
+                    "reason": "已在 FreeCompare 中通过差异审查"
+                })
+            );
+        }
+        _ => {
+            println!(
+                "{}",
+                json!({
+                    "decision": "deny",
+                    "reason": "用户在 FreeCompare 中取消或拒绝了该文件的修改审查"
+                })
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolves the current executable path normalized for cross-platform Git configuration
@@ -345,7 +525,9 @@ fn run_cli_summary(inv: &CliInvocation) -> Result<()> {
             let left = &paths[0];
             let right = &paths[1];
             if left.is_dir() && right.is_dir() {
-                let res = compare_folders(left, right, &FolderCompareOptions::default())?;
+                let mut opts = FolderCompareOptions::default();
+                opts.recursive = true;
+                let res = compare_folders(left, right, &opts)?;
                 println!(
                     "Folder Compare: {} vs {}\nTotal: {}, Equal: {}, Modified: {}, Left Only: {}, Right Only: {}",
                     res.left_root,
@@ -492,10 +674,19 @@ fn handle_http_connection(
             dist_dir.join("index.html")
         };
 
-        if let Ok(bytes) = fs::read(&resolved) {
+        if let Ok(mut bytes) = fs::read(&resolved) {
             let mime = guess_mime(&resolved);
+            if resolved.extension().and_then(|e| e.to_str()) == Some("html") {
+                if let Ok(html_str) = String::from_utf8(bytes.clone()) {
+                    let now = now_ms();
+                    let busted = html_str
+                        .replace(".js\"", &format!(".js?v={now}\""))
+                        .replace(".css\"", &format!(".css?v={now}\""));
+                    bytes = busted.into_bytes();
+                }
+            }
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\nConnection: close\r\n\r\n",
                 bytes.len()
             );
             stream.write_all(header.as_bytes())?;
@@ -505,18 +696,27 @@ fn handle_http_connection(
     }
 
     // 2. Fallback to compile-time embedded UI assets (enables standalone single-binary distribution!)
-    if let Some((asset_rel, bytes)) = get_embedded_ui_asset(rel_target)
-        .map(|b| (rel_target, b))
-        .or_else(|| get_embedded_ui_asset("index.html").map(|b| ("index.html", b)))
+    if let Some((asset_rel, mut bytes_vec)) = get_embedded_ui_asset(rel_target)
+        .map(|b| (rel_target, b.to_vec()))
+        .or_else(|| get_embedded_ui_asset("index.html").map(|b| ("index.html", b.to_vec())))
     {
         tracker.touch();
         let mime = guess_mime(Path::new(asset_rel));
+        if asset_rel.ends_with(".html") {
+            if let Ok(html_str) = String::from_utf8(bytes_vec.clone()) {
+                let now = now_ms();
+                let busted = html_str
+                    .replace(".js\"", &format!(".js?v={now}\""))
+                    .replace(".css\"", &format!(".css?v={now}\""));
+                bytes_vec = busted.into_bytes();
+            }
+        }
         let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-            bytes.len()
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate, max-age=0\r\nPragma: no-cache\r\nExpires: 0\r\nConnection: close\r\n\r\n",
+            bytes_vec.len()
         );
         stream.write_all(header.as_bytes())?;
-        stream.write_all(bytes)?;
+        stream.write_all(&bytes_vec)?;
         return Ok(());
     }
 

@@ -42,3 +42,9 @@
 - [x] 增量语法高亮与深色/浅色主题切换（Dark / Light Mode）
 - [x] 首页新建会话引导与历史会话卡片恢复 (`HomeView.tsx`)
 - [x] GitHub Actions 三端矩阵测试与构建配置 (`.github/workflows/release.yml`：Windows / macOS / Linux)
+
+### Phase 6: Antigravity CLI 开发者工作流集成与审查守卫 (AGY Guard)
+- [x] 实现 PreToolUse 拦截钩子，在 AI 拟修改代码前自动拉起 `fcompare` 双向可视化审查
+- [x] 审查模式原生支持：提供 `✅ 通过审查 (Esc)` 与 `❌ 拒绝修改 (Shift+Esc)` 一键控制
+- [x] 原生全量文件加载与 `~` 家目录路径智能展开支持
+- [x] 线上真实拦截联调与用户交互验收测试

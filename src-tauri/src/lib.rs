@@ -9,16 +9,25 @@ use freecompare_core::{
         three_way::{ConflictResolution, ThreeWayDiffResult, ThreeWayRow, ThreeWaySession},
         two_way::{DiffOptions, MergeDirection, TwoWayDiffResult, TwoWaySession, ViewportSliceDto},
     },
+    expand_path,
     folder::{
         apply_folder_item_operation, compare_folders, FolderCompareOptions,
         FolderDiffResult, FolderSyncActionKind,
     },
-    SessionKind, SessionManager, SessionRecord, StartupLaunchSession, UserPreferences,
+    SessionKind, SessionManager, SessionRecord, StartupLaunchSession, TextBuffer, UserPreferences,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadTextFileResponse {
+    pub content: String,
+    pub path: String,
+    pub line_count: usize,
+    pub encoding: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenTwoWayResponse {
@@ -100,6 +109,7 @@ impl AppBackend {
                     readonly: inv.readonly,
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
+                    review_mode: inv.review_mode,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -129,6 +139,7 @@ impl AppBackend {
                     readonly: inv.readonly,
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
+                    review_mode: inv.review_mode,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -168,6 +179,7 @@ impl AppBackend {
                         readonly: inv.readonly,
                         expand_all: inv.expand_all,
                         filters: inv.filters.clone(),
+                        review_mode: inv.review_mode,
                     };
                     *self.manager.startup_session.write() = Some(launch.clone());
                     Ok(launch)
@@ -189,6 +201,7 @@ impl AppBackend {
                         readonly: inv.readonly,
                         expand_all: inv.expand_all,
                         filters: inv.filters.clone(),
+                        review_mode: inv.review_mode,
                     };
                     *self.manager.startup_session.write() = Some(launch.clone());
                     Ok(launch)
@@ -250,6 +263,7 @@ impl AppBackend {
                     readonly: inv.readonly,
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
+                    review_mode: inv.review_mode,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -441,9 +455,25 @@ impl AppBackend {
         })
     }
 
+    pub fn read_text_file(&self, path: &str) -> Result<ReadTextFileResponse, String> {
+        let expanded = expand_path(path);
+        let buffer = TextBuffer::from_file(&expanded)
+            .map_err(|e| format!("无法读取文件 ({}): {}", expanded.display(), e))?;
+        Ok(ReadTextFileResponse {
+            content: buffer.full_text(),
+            path: expanded.to_string_lossy().to_string(),
+            line_count: buffer.line_count(),
+            encoding: buffer.encoding().label().to_string(),
+        })
+    }
+
     pub fn write_text_file(&self, path: &str, content: &str) -> Result<(), String> {
-        std::fs::write(path, content.as_bytes())
-            .map_err(|e| format!("无法保存文件 {path}: {e}"))
+        let expanded = expand_path(path);
+        if let Some(parent) = expanded.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&expanded, content.as_bytes())
+            .map_err(|e| format!("无法保存文件 ({}): {}", expanded.display(), e))
     }
 
     pub fn open_two_way_files(
@@ -688,7 +718,9 @@ impl AppBackend {
         right_dir: &str,
         options: FolderCompareOptions,
     ) -> Result<FolderDiffResult, String> {
-        let res = compare_folders(left_dir, right_dir, &options)
+        let left_expanded = expand_path(left_dir);
+        let right_expanded = expand_path(right_dir);
+        let res = compare_folders(&left_expanded, &right_expanded, &options)
             .map_err(|e| format!("无法扫描目录 ({left_dir} vs {right_dir}): {e}"))?;
         self.manager.record_recent(
             format!(
@@ -703,6 +735,19 @@ impl AppBackend {
             None,
         );
         Ok(res)
+    }
+
+    pub fn compare_subfolder(
+        &self,
+        left_dir: &str,
+        right_dir: &str,
+        sub_rel: &str,
+        options: FolderCompareOptions,
+    ) -> Result<freecompare_core::folder::FolderSubtreeResult, String> {
+        let left_expanded = expand_path(left_dir);
+        let right_expanded = expand_path(right_dir);
+        freecompare_core::folder::compare_subfolder(&left_expanded, &right_expanded, sub_rel, &options)
+            .map_err(|e| format!("无法嵌套比较子目录 ({sub_rel}): {e}"))
     }
 
     pub fn sync_folder_item(
@@ -862,6 +907,11 @@ impl AppBackend {
                 let res = self.list_local_dir(dir_path)?;
                 Ok(json!(res))
             }
+            "read_text_file" => {
+                let path = args["path"].as_str().unwrap_or("");
+                let res = self.read_text_file(path)?;
+                Ok(json!(res))
+            }
             "write_text_file" => {
                 let path = args["path"].as_str().unwrap_or("");
                 let content = args["content"].as_str().unwrap_or("");
@@ -937,6 +987,15 @@ impl AppBackend {
                 let options: FolderCompareOptions =
                     serde_json::from_value(args["options"].clone()).unwrap_or_default();
                 let res = self.scan_folder_diff(left_dir, right_dir, options)?;
+                Ok(json!(res))
+            }
+            "compare_subfolder" => {
+                let left_dir = args["left_dir"].as_str().unwrap_or("");
+                let right_dir = args["right_dir"].as_str().unwrap_or("");
+                let sub_rel = args["sub_rel"].as_str().unwrap_or("");
+                let options: FolderCompareOptions =
+                    serde_json::from_value(args["options"].clone()).unwrap_or_default();
+                let res = self.compare_subfolder(left_dir, right_dir, sub_rel, options)?;
                 Ok(json!(res))
             }
             "sync_folder_item" => {

@@ -1,0 +1,17 @@
+{
+  "fcompare-guard": {
+    "enabled": false,
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "fcompare guard",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

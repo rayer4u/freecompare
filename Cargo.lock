@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "freecompare-app"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "freecompare-core",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "freecompare-cli"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "freecompare-app",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "freecompare-core"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
