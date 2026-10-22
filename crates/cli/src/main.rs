@@ -768,33 +768,16 @@ fn guess_mime(path: &Path) -> &'static str {
 }
 
 fn locate_ui_dist() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    // Only allow explicit override via FREECOMPARE_UI_DIST for local UI development.
+    // Implicit candidate directories (such as ~/.local/share, CWD, or parent dirs) are strictly
+    // avoided to preserve single-binary self-contained immutability and prevent stale cache hijacking.
     if let Ok(custom) = env::var("FREECOMPARE_UI_DIST") {
-        candidates.push(PathBuf::from(custom));
-    }
-    if let Ok(cwd) = env::current_dir() {
-        candidates.push(cwd.join("ui").join("dist"));
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("ui").join("dist"));
-            candidates.push(parent.join("..").join("share").join("freecompare").join("ui").join("dist"));
-            candidates.push(parent.join("..").join("..").join("ui").join("dist"));
+        let path = PathBuf::from(custom);
+        if path.join("index.html").is_file() {
+            return Some(path);
         }
     }
-    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("freecompare")
-                .join("ui")
-                .join("dist"),
-        );
-    }
-    candidates.push(PathBuf::from("/usr/local/share/freecompare/ui/dist"));
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/dist"));
-    candidates.into_iter().find(|p| p.join("index.html").is_file())
+    None
 }
 
 fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
