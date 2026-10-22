@@ -2,6 +2,8 @@
 
 对标 Beyond Compare，全新构建的开源跨平台（Windows / macOS / Linux），AI友好的文件对比、双向/三向合并与目录同步工具。受[OpenCompare](https://github.com/chaxiu/OpenCompare)启发，作为一个老程序员，beyondcompare的资深付费用户，AI变革的参与者，为解决bcompare的能力逐渐落后开发需求问题，探索和AI合作开发能力边界，测试验证AI的快速迭代能力，新建此项目。此项目的AI编程辅助工具是agy cli，模型是Gemini 4 Argon，effort默认low。
 
+![UI展示](images/ui.png)
+
 ## 核心特性
 1. **自研双栏虚拟滚动引擎 (`VirtualDiffViewport`)**：
    - 定高极速虚拟行池 + 水平/垂直双栏同步滚动 + Gap 斜纹对齐占位行。
