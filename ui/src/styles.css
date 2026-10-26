@@ -1475,31 +1475,65 @@ body {
   outline: none;
 }
 
-/* Folder Context Menu (Beyond Compare style) */
-.folder-context-menu {
+/* Shared Context Menu & Dropdown Menu (Beyond Compare style) */
+.app-context-menu,
+.folder-context-menu,
+.app-dropdown-menu {
   background: var(--bg-secondary, #1e293b);
   border: 1px solid var(--border-color, #334155);
   border-radius: 6px;
   padding: 4px 0;
-  min-width: 210px;
+  min-width: 220px;
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
   font-size: 12.5px;
   color: var(--text-primary, #f1f5f9);
   user-select: none;
+  z-index: 9999;
 }
 
-.ctx-item {
+.app-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+}
+
+.ctx-item,
+.dropdown-item {
   padding: 6px 14px;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
-  transition: background 0.15s ease;
+  justify-content: space-between;
+  gap: 12px;
+  transition: background 0.12s ease;
 }
 
-.ctx-item:hover {
+.ctx-item:hover,
+.dropdown-item:hover {
   background: var(--btn-hover-bg, rgba(56, 189, 248, 0.15));
   color: #38bdf8;
+}
+
+.ctx-item.disabled,
+.dropdown-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.ctx-shortcut {
+  font-size: 11px;
+  opacity: 0.6;
+  font-family: var(--font-mono);
+}
+
+.dropdown-check {
+  width: 14px;
+  font-weight: bold;
+  color: #38bdf8;
+  display: inline-block;
+  text-align: center;
+  margin-right: 6px;
 }
 
 .ctx-item.highlight {
@@ -1511,7 +1545,8 @@ body {
   background: rgba(56, 189, 248, 0.25);
 }
 
-.ctx-divider {
+.ctx-divider,
+.dropdown-divider {
   height: 1px;
   background: var(--border-color, #334155);
   margin: 4px 0;

@@ -30,6 +30,11 @@ interface VirtualDiffViewportProps {
   onMergeHunk: (hunkId: number, direction: MergeDirection) => void;
   onEditLine: (isLeft: boolean, lineNo1Based: number, newText: string) => void;
   scrollTriggerRow?: number | null;
+  onContextMenu?: (
+    e: MouseEvent,
+    row: ViewportRowDto | null,
+    side: "left" | "right"
+  ) => void;
 }
 
 export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) => {
@@ -166,6 +171,12 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
               props.focusedSide === "left" ? "pane-focused" : ""
             } ${props.allSelectedSide === "left" ? "pane-all-selected" : ""}`}
             onClick={() => props.onFocusSide("left")}
+            onContextMenu={(e) => {
+              if (e.defaultPrevented) return;
+              e.preventDefault();
+              props.onFocusSide("left");
+              props.onContextMenu?.(e, null, "left");
+            }}
             onPaste={(e) => {
               if (editingCell()) return;
               const text = e.clipboardData?.getData("text/plain");
@@ -209,6 +220,13 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       onClick={() => {
                         props.onFocusSide("left");
                         props.onSelectRow(row);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        props.onFocusSide("left");
+                        props.onSelectRow(row);
+                        props.onContextMenu?.(e, row, "left");
                       }}
                       onDblClick={() => {
                         if (row.left_line_no !== null && row.left_text !== null) {
@@ -340,6 +358,12 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
               props.focusedSide === "right" ? "pane-focused" : ""
             } ${props.allSelectedSide === "right" ? "pane-all-selected" : ""}`}
             onClick={() => props.onFocusSide("right")}
+            onContextMenu={(e) => {
+              if (e.defaultPrevented) return;
+              e.preventDefault();
+              props.onFocusSide("right");
+              props.onContextMenu?.(e, null, "right");
+            }}
             onPaste={(e) => {
               if (editingCell()) return;
               const text = e.clipboardData?.getData("text/plain");
@@ -383,6 +407,13 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       onClick={() => {
                         props.onFocusSide("right");
                         props.onSelectRow(row);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        props.onFocusSide("right");
+                        props.onSelectRow(row);
+                        props.onContextMenu?.(e, row, "right");
                       }}
                       onDblClick={() => {
                         if (row.right_line_no !== null && row.right_text !== null) {

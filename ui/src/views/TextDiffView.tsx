@@ -60,7 +60,35 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const [confirmExitDirty, setConfirmExitDirty] = createSignal<boolean>(true);
   const [recentLeftPaths, setRecentLeftPaths] = createSignal<string[]>([]);
   const [recentRightPaths, setRecentRightPaths] = createSignal<string[]>([]);
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number;
+    y: number;
+    row: ViewportRowDto | null;
+    side: "left" | "right";
+  } | null>(null);
+  const [rulesMenuPos, setRulesMenuPos] = createSignal<{ top: number; left: number } | null>(null);
   let lastReportedTitle = "";
+
+  const dismissMenus = (e?: MouseEvent) => {
+    const target = e?.target as HTMLElement | null;
+    if (target?.closest(".rules-dropdown-trigger") || target?.closest(".app-dropdown-menu")) {
+      return;
+    }
+    if (contextMenu()) setContextMenu(null);
+    if (rulesMenuPos()) setRulesMenuPos(null);
+  };
+
+  const toggleRulesDropdown = (e: MouseEvent) => {
+    e.stopPropagation();
+    if (rulesMenuPos()) {
+      setRulesMenuPos(null);
+    } else {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const menuWidth = 220;
+      const left = Math.min(rect.left, Math.max(10, window.innerWidth - menuWidth - 10));
+      setRulesMenuPos({ top: rect.bottom + 4, left });
+    }
+  };
 
   const tryCloseOrExit = () => {
     if (
@@ -286,7 +314,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     const nextSummary = CompareBackendClient.swapSides(props.sessionId);
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
-    showToast("已交换左右两侧内容");
+    showToast(t("text_diff.swap_toast"));
   };
 
   const handleSetRowFilter = (filter: ViewRowFilter) => {
@@ -491,6 +519,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     // 1. `Esc` key: Beyond Compare's signature muscle-memory shortcut!
     // If a modal or full-text selection is open, dismiss it first; otherwise exit / advance to next git difftool file!
     if (e.key === "Escape") {
+      if (contextMenu()) {
+        setContextMenu(null);
+        return;
+      }
+      if (rulesMenuPos()) {
+        setRulesMenuPos(null);
+        return;
+      }
       if (browserTargetSide()) {
         setBrowserTargetSide(null);
         return;
@@ -743,6 +779,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
 
   onMount(async () => {
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("click", dismissMenus);
     const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
     if (prefs) {
       const f =
@@ -774,12 +811,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
 
   onCleanup(() => {
     window.removeEventListener("keydown", handleKeyDown);
+    window.removeEventListener("click", dismissMenus);
   });
 
   return (
     <div class="view-container">
-      {/* Beyond Compare Style Action Toolbar */}
+      {/* Beyond Compare Style Action Toolbar (Clean & Slimmed) */}
       <div class="bc-toolbar">
+        {/* 1. 视图过滤分段按钮 (全部 / ≠ 差异 / ＝ 相同) */}
         <div class="bc-toolbar-group">
           <button
             class={`bc-tool-btn ${rowFilter() === "all" ? "active" : ""}`}
@@ -806,51 +845,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
 
         <div class="bc-toolbar-divider" />
 
-        <div class="bc-toolbar-group">
-          <button
-            class={`bc-tool-btn ${options().ignore_whitespace ? "active" : ""}`}
-            onClick={() => handleToggleOption("ignore_whitespace")}
-            title={t("text_diff.ignore_whitespace_tip")}
-          >
-            {t("text_diff.ignore_whitespace")}
-          </button>
-          <button
-            class={`bc-tool-btn ${options().ignore_case ? "active" : ""}`}
-            onClick={() => handleToggleOption("ignore_case")}
-            title={t("text_diff.ignore_case_tip")}
-          >
-            {t("text_diff.ignore_case")}
-          </button>
-          <button
-            class={`bc-tool-btn ${showWhitespaceGlyphs() ? "active" : ""}`}
-            onClick={() => {
-              const next = !showWhitespaceGlyphs();
-              setShowWhitespaceGlyphs(next);
-              callRustRpc("update_user_preferences", {
-                show_whitespace_glyphs: next,
-              }).catch(() => {});
-            }}
-            title={t("text_diff.whitespace_glyphs_tip")}
-          >
-            {t("text_diff.whitespace_glyphs")}
-          </button>
-          <button
-            class={`bc-tool-btn ${showLineInspector() ? "active" : ""}`}
-            onClick={() => {
-              const next = !showLineInspector();
-              setShowLineInspector(next);
-              callRustRpc("update_user_preferences", {
-                show_line_inspector: next,
-              }).catch(() => {});
-            }}
-            title={t("text_diff.line_inspector_tip")}
-          >
-            {t("text_diff.line_inspector")}
-          </button>
-        </div>
-
-        <div class="bc-toolbar-divider" />
-
+        {/* 2. 差异导航 (上一处 / 下一处) */}
         <div class="bc-toolbar-group">
           <button
             class="bc-tool-btn"
@@ -868,74 +863,31 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           >
             {t("text_diff.next_diff")}
           </button>
-          <button
-            class="bc-tool-btn accent-right"
-            disabled={!currentHunk()}
-            onClick={() => currentHunk() && handleMergeHunk(currentHunk()!.id, "left_to_right")}
-            title={t("text_diff.copy_to_right_tip")}
-          >
-            {t("text_diff.copy_to_right")}
-          </button>
-          <button
-            class="bc-tool-btn accent-left"
-            disabled={!currentHunk()}
-            onClick={() => currentHunk() && handleMergeHunk(currentHunk()!.id, "right_to_left")}
-            title={t("text_diff.copy_to_left_tip")}
-          >
-            {t("text_diff.copy_to_left")}
-          </button>
-          <button
-            class="bc-tool-btn"
-            onClick={handleSwapSides}
-            title={t("text_diff.swap_sides_tip")}
-          >
-            {t("text_diff.swap_sides")}
-          </button>
         </div>
 
         <div class="bc-toolbar-divider" />
 
+        {/* 3. 核心保存 */}
         <div class="bc-toolbar-group">
           <button
-            class="bc-tool-btn"
-            onClick={() => handleUndo(focusedSide() === "left")}
-            title={t("text_diff.undo_tip")}
-          >
-            {t("text_diff.undo")}
-          </button>
-          <button
-            class="bc-tool-btn"
-            onClick={() => handleRedo(focusedSide() === "left")}
-            title={t("text_diff.redo_tip")}
-          >
-            {t("text_diff.redo")}
-          </button>
-          <button
-            class="bc-tool-btn"
-            onClick={() => {
-              const side = focusedSide();
-              setFullEditDraft(
-                CompareBackendClient.getSideFullText(props.sessionId, side === "left")
-              );
-              setEditingFullSide(side);
-            }}
-            title={t("text_diff.edit_text_tip")}
-          >
-            {t("text_diff.edit_text")}
-          </button>
-          <button
-            class="bc-tool-btn"
+            class={`bc-tool-btn ${summary().left_dirty || summary().right_dirty ? "dirty-accent" : ""}`}
             onClick={() => handleSaveSide(focusedSide() === "left")}
             title={t("text_diff.save_tip")}
           >
             {t("text_diff.save")}
           </button>
+        </div>
+
+        <div class="bc-toolbar-divider" />
+
+        {/* 4. 规则与视图收敛下拉菜单 (单个按钮代替原先零散的4个大按钮) */}
+        <div class="bc-toolbar-group">
           <button
-            class="bc-tool-btn"
-            onClick={handleReload}
-            title={t("text_diff.reload_tip")}
+            class={`bc-tool-btn rules-dropdown-trigger ${rulesMenuPos() ? "active" : ""}`}
+            onClick={toggleRulesDropdown}
+            title={t("text_diff.view_rules_tip")}
           >
-            {t("text_diff.reload")}
+            {t("text_diff.view_rules_btn")} ▾
           </button>
         </div>
 
@@ -960,14 +912,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               onClick={() => switchToSiblingFile(currentSiblingIdx() - 1)}
               title={t("text_diff.prev_file_tip")}
             >
-              {t("text_diff.prev_file")}
+              ◀
             </button>
             <button
               class="bc-tool-btn"
               onClick={() => switchToSiblingFile(currentSiblingIdx() + 1)}
               title={t("text_diff.next_file_tip")}
             >
-              {t("text_diff.next_file")}
+              ▶
             </button>
           </div>
         </Show>
@@ -1164,6 +1116,13 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           onMergeHunk={handleMergeHunk}
           onEditLine={handleEditLine}
           scrollTriggerRow={scrollTriggerRow()}
+          onContextMenu={(e, row, side) => {
+            const menuWidth = 240;
+            const menuHeight = 360;
+            const x = Math.min(e.clientX, window.innerWidth - menuWidth - 10);
+            const y = Math.min(e.clientY, window.innerHeight - menuHeight - 10);
+            setContextMenu({ x, y, row, side });
+          }}
         />
       </div>
 
@@ -1272,6 +1231,202 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           </Show>
         </div>
       </footer>
+
+      {/* Viewport Right-Click Context Menu */}
+      <Show when={contextMenu()}>
+        {(menu) => {
+          const side = () => menu().side;
+          const isLeft = () => side() === "left";
+          const hunk = () => currentHunk();
+
+          return (
+            <div
+              class="app-context-menu"
+              style={{
+                position: "fixed",
+                top: `${menu().y}px`,
+                left: `${menu().x}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Show when={hunk()}>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    handleMergeHunk(hunk()!.id, "left_to_right");
+                  }}
+                >
+                  <span>{t("text_diff.copy_to_right")}</span>
+                  <span class="ctx-shortcut">Alt+→</span>
+                </div>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    handleMergeHunk(hunk()!.id, "right_to_left");
+                  }}
+                >
+                  <span>{t("text_diff.copy_to_left")}</span>
+                  <span class="ctx-shortcut">Alt+←</span>
+                </div>
+                <div class="ctx-divider" />
+              </Show>
+
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  const targetSide = side();
+                  setFullEditDraft(
+                    CompareBackendClient.getSideFullText(props.sessionId, targetSide === "left")
+                  );
+                  setEditingFullSide(targetSide);
+                }}
+              >
+                <span>{t("text_diff.ctx_edit_side")}</span>
+              </div>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleUndo(isLeft());
+                }}
+              >
+                <span>{t("text_diff.undo")}</span>
+                <span class="ctx-shortcut">Ctrl+Z</span>
+              </div>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleRedo(isLeft());
+                }}
+              >
+                <span>{t("text_diff.redo")}</span>
+                <span class="ctx-shortcut">Ctrl+Y</span>
+              </div>
+
+              <div class="ctx-divider" />
+
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleSaveSide(isLeft());
+                }}
+              >
+                <span>{t("text_diff.save")}</span>
+                <span class="ctx-shortcut">Ctrl+S</span>
+              </div>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleSwapSides();
+                }}
+              >
+                <span>{t("text_diff.swap_sides")}</span>
+              </div>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleReload();
+                }}
+              >
+                <span>{t("text_diff.reload")}</span>
+                <span class="ctx-shortcut">F5</span>
+              </div>
+
+              <div class="ctx-divider" />
+
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  const row = menu().row;
+                  const text = isLeft() ? row?.left_text : row?.right_text;
+                  if (text !== null && text !== undefined) {
+                    navigator.clipboard.writeText(text);
+                    showToast(t("text_diff.ctx_copy_line") + " (" + text.length + " chars)");
+                  }
+                }}
+              >
+                <span>{t("text_diff.ctx_copy_line")}</span>
+                <span class="ctx-shortcut">Ctrl+C</span>
+              </div>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  dismissMenus();
+                  handleCopySideToClipboard(isLeft());
+                }}
+              >
+                <span>{t("text_diff.ctx_copy_side")}</span>
+              </div>
+            </div>
+          );
+        }}
+      </Show>
+
+      {/* 视图与规则浮动菜单 (Fixed positioning avoids overflow clipping) */}
+      <Show when={rulesMenuPos()}>
+        {(pos) => (
+          <div
+            class="app-dropdown-menu"
+            style={{
+              position: "fixed",
+              top: `${pos().top}px`,
+              left: `${pos().left}px`,
+              "z-index": 9999,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              class="dropdown-item"
+              onClick={() => handleToggleOption("ignore_whitespace")}
+            >
+              <span>{t("text_diff.ignore_whitespace")}</span>
+              <span class="dropdown-check">{options().ignore_whitespace ? "✓" : ""}</span>
+            </div>
+            <div
+              class="dropdown-item"
+              onClick={() => handleToggleOption("ignore_case")}
+            >
+              <span>{t("text_diff.ignore_case")}</span>
+              <span class="dropdown-check">{options().ignore_case ? "✓" : ""}</span>
+            </div>
+            <div
+              class="dropdown-item"
+              onClick={() => {
+                const next = !showWhitespaceGlyphs();
+                setShowWhitespaceGlyphs(next);
+                callRustRpc("update_user_preferences", {
+                  show_whitespace_glyphs: next,
+                }).catch(() => {});
+              }}
+            >
+              <span>{t("text_diff.whitespace_glyphs")}</span>
+              <span class="dropdown-check">{showWhitespaceGlyphs() ? "✓" : ""}</span>
+            </div>
+            <div class="dropdown-divider" />
+            <div
+              class="dropdown-item"
+              onClick={() => {
+                const next = !showLineInspector();
+                setShowLineInspector(next);
+                callRustRpc("update_user_preferences", {
+                  show_line_inspector: next,
+                }).catch(() => {});
+              }}
+            >
+              <span>{t("text_diff.line_inspector")}</span>
+              <span class="dropdown-check">{showLineInspector() ? "✓" : ""}</span>
+            </div>
+          </div>
+        )}
+      </Show>
 
       {/* Native Disk File Browser Modal */}
       <Show when={browserTargetSide()}>

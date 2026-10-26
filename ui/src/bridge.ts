@@ -1,4 +1,4 @@
-import {
+import type {
   ConflictResolution,
   DiffOptions,
   DiffStats,
@@ -16,7 +16,7 @@ import {
   TwoWayHunk,
   ViewportRowDto,
   ViewportSliceDto,
-} from "./types";
+} from "./types.ts";
 
 declare global {
   interface Window {
@@ -735,6 +735,12 @@ export class CompareBackendClient {
     const tmpDirty = state.leftDirty;
     state.leftDirty = state.rightDirty;
     state.rightDirty = tmpDirty;
+    const tmpUndo = state.leftUndo;
+    state.leftUndo = state.rightUndo;
+    state.rightUndo = tmpUndo;
+    const tmpRedo = state.leftRedo;
+    state.leftRedo = state.rightRedo;
+    state.rightRedo = tmpRedo;
     recomputeLocalTwoWay(state);
     return summarizeLocalTwoWay(state);
   }

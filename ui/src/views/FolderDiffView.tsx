@@ -548,23 +548,6 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               mode: compareMode() === "hash" ? t("folder_diff.mode_hash") : t("folder_diff.mode_fast"),
             })}
           </button>
-          <button
-            class="bc-tool-btn accent-right"
-            disabled={!selectedRelPath()}
-            onClick={() => handleCopyItem("left_to_right")}
-          >
-            {t("folder_diff.copy_to_right")}
-          </button>
-          <button
-            class="bc-tool-btn accent-left"
-            disabled={!selectedRelPath()}
-            onClick={() => handleCopyItem("right_to_left")}
-          >
-            {t("folder_diff.copy_to_left")}
-          </button>
-          <button class="bc-tool-btn" onClick={handleSwapFolders}>
-            {t("folder_diff.swap_sides")}
-          </button>
         </div>
 
         <div class="bc-toolbar-divider" />
@@ -800,6 +783,25 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               }}
             >
               <span>{t("folder_diff.copy_rel_path_item")}</span>
+            </div>
+            <div class="ctx-divider" />
+            <div
+              class="ctx-item"
+              onClick={() => {
+                setContextMenu(null);
+                handleSwapFolders();
+              }}
+            >
+              <span>{t("folder_diff.ctx_swap_dirs")}</span>
+            </div>
+            <div
+              class="ctx-item"
+              onClick={() => {
+                setContextMenu(null);
+                scanRealFolders(leftInput(), rightInput());
+              }}
+            >
+              <span>{t("folder_diff.ctx_rescan")}</span>
             </div>
           </div>
         )}
