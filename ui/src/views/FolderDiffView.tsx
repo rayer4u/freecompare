@@ -649,7 +649,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         </div>
 
         <div class="folder-tree-body" style={{ position: "relative" }}>
-          <Show when={folderData().entries.length === 0}>
+          <Show when={(folderData()?.entries?.length ?? 0) === 0}>
             <div class="empty-paste-overlay">
               <div class="paste-hint-card">
                 <strong>{t("folder_diff.empty_title")}</strong>

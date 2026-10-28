@@ -929,7 +929,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               }}
               title="Ctrl+B"
             >
-              {t("text_diff.files_nav")} ({Math.max(1, currentSiblingIdx() + 1)}/{props.siblingFiles!.length})
+              {t("text_diff.files_nav")} ({Math.max(1, currentSiblingIdx() + 1)}/{props.siblingFiles?.length ?? 0})
             </button>
             <button
               class="bc-tool-btn"
@@ -1059,7 +1059,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                 "align-items": "center",
               }}
             >
-              <span>{t("text_diff.changed_files")} ({props.siblingFiles!.length})</span>
+              <span>{t("text_diff.changed_files")} ({props.siblingFiles?.length ?? 0})</span>
               <span style={{ "font-size": "11px", opacity: "0.7" }}>{t("text_diff.switch_hint")}</span>
             </div>
             <div style={{ flex: "1", "overflow-y": "auto", padding: "4px 0" }}>
@@ -1206,23 +1206,30 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <span class="inspector-side-label">{t("text_diff.side_left")}</span>
               <code class="inspector-code">
                 <Show
-                  when={selectedRow()?.left_inline?.length}
-                  fallback={
-                    <Show
-                      when={selectedRow()?.left_text !== null}
-                      fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
-                    >
-                      <span>{selectedRow()!.left_text}</span>
-                    </Show>
-                  }
+                  when={selectedRow()}
+                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
                 >
-                  <For each={selectedRow()!.left_inline}>
-                    {(seg) => (
-                      <span class={seg.tag === "delete" ? "inline-char-delete" : ""}>
-                        {seg.text}
-                      </span>
-                    )}
-                  </For>
+                  {(row) => (
+                    <Show
+                      when={row().left_inline?.length}
+                      fallback={
+                        <Show
+                          when={row().left_text !== null}
+                          fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                        >
+                          <span>{row().left_text}</span>
+                        </Show>
+                      }
+                    >
+                      <For each={row().left_inline}>
+                        {(seg) => (
+                          <span class={seg.tag === "delete" ? "inline-char-delete" : ""}>
+                            {seg.text}
+                          </span>
+                        )}
+                      </For>
+                    </Show>
+                  )}
                 </Show>
               </code>
             </div>
@@ -1230,23 +1237,30 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <span class="inspector-side-label">{t("text_diff.side_right")}</span>
               <code class="inspector-code">
                 <Show
-                  when={selectedRow()?.right_inline?.length}
-                  fallback={
-                    <Show
-                      when={selectedRow()?.right_text !== null}
-                      fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
-                    >
-                      <span>{selectedRow()!.right_text}</span>
-                    </Show>
-                  }
+                  when={selectedRow()}
+                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
                 >
-                  <For each={selectedRow()!.right_inline}>
-                    {(seg) => (
-                      <span class={seg.tag === "insert" ? "inline-char-insert" : ""}>
-                        {seg.text}
-                      </span>
-                    )}
-                  </For>
+                  {(row) => (
+                    <Show
+                      when={row().right_inline?.length}
+                      fallback={
+                        <Show
+                          when={row().right_text !== null}
+                          fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                        >
+                          <span>{row().right_text}</span>
+                        </Show>
+                      }
+                    >
+                      <For each={row().right_inline}>
+                        {(seg) => (
+                          <span class={seg.tag === "insert" ? "inline-char-insert" : ""}>
+                            {seg.text}
+                          </span>
+                        )}
+                      </For>
+                    </Show>
+                  )}
                 </Show>
               </code>
             </div>
@@ -1286,7 +1300,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         <div class="statusbar-right">
           <Show when={(props.siblingFiles?.length ?? 0) > 0}>
             <span class="statusbar-item">
-              📂 {Math.max(1, currentSiblingIdx() + 1)} / {props.siblingFiles!.length}
+              📂 {Math.max(1, currentSiblingIdx() + 1)} / {props.siblingFiles?.length ?? 0}
             </span>
           </Show>
           <Show when={!isReviewMode()}>
@@ -1319,27 +1333,31 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               onClick={(e) => e.stopPropagation()}
             >
               <Show when={hunk()}>
-                <div
-                  class="ctx-item"
-                  onClick={() => {
-                    dismissMenus();
-                    handleMergeHunk(hunk()!.id, "left_to_right");
-                  }}
-                >
-                  <span>{t("text_diff.copy_to_right")}</span>
-                  <span class="ctx-shortcut">Alt+→</span>
-                </div>
-                <div
-                  class="ctx-item"
-                  onClick={() => {
-                    dismissMenus();
-                    handleMergeHunk(hunk()!.id, "right_to_left");
-                  }}
-                >
-                  <span>{t("text_diff.copy_to_left")}</span>
-                  <span class="ctx-shortcut">Alt+←</span>
-                </div>
-                <div class="ctx-divider" />
+                {(h) => (
+                  <>
+                    <div
+                      class="ctx-item"
+                      onClick={() => {
+                        dismissMenus();
+                        handleMergeHunk(h().id, "left_to_right");
+                      }}
+                    >
+                      <span>{t("text_diff.copy_to_right")}</span>
+                      <span class="ctx-shortcut">Alt+→</span>
+                    </div>
+                    <div
+                      class="ctx-item"
+                      onClick={() => {
+                        dismissMenus();
+                        handleMergeHunk(h().id, "right_to_left");
+                      }}
+                    >
+                      <span>{t("text_diff.copy_to_left")}</span>
+                      <span class="ctx-shortcut">Alt+←</span>
+                    </div>
+                    <div class="ctx-divider" />
+                  </>
+                )}
               </Show>
 
               <div

@@ -147,7 +147,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
             {props.mode === "folder"
               ? t("file_browser.sel_folder", { path: selectedItem()?.path ?? currentDir() })
               : selectedItem()
-              ? t("file_browser.sel_file", { name: selectedItem()!.name })
+              ? t("file_browser.sel_file", { name: selectedItem()?.name ?? "" })
               : t("file_browser.no_file")}
           </span>
           <div class="modal-footer-btns">
@@ -156,7 +156,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
             </button>
             <button
               class="bc-tool-btn active"
-              disabled={props.mode === "file" && (!selectedItem() || selectedItem()!.is_dir)}
+              disabled={props.mode === "file" && (!selectedItem() || selectedItem()?.is_dir)}
               onClick={handleConfirm}
             >
               {t("file_browser.confirm_select")}

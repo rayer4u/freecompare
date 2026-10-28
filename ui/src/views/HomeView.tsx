@@ -84,7 +84,7 @@ export const HomeView: Component<HomeViewProps> = (props) => {
           }}
         >
           <h4>{t("home.recent_title")}</h4>
-          <Show when={recentRecords().length > 0}>
+          <Show when={(recentRecords()?.length ?? 0) > 0}>
             <button class="bc-tool-btn" onClick={handleClearRecent}>
               {t("home.clear_history")}
             </button>
@@ -92,7 +92,7 @@ export const HomeView: Component<HomeViewProps> = (props) => {
         </div>
 
         <Show
-          when={recentRecords().length > 0}
+          when={(recentRecords()?.length ?? 0) > 0}
           fallback={
             <div class="recent-item" style={{ cursor: "default", opacity: 0.7 }}>
               <span>{t("home.empty_recent")}</span>

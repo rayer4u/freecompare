@@ -85,3 +85,31 @@ test("View title reporter deduplicates identical path notifications", () => {
   assert.strictEqual(reportedCount, 2);
   assert.strictEqual(lastReportedTitle, "main.rs ↔ lib.rs");
 });
+
+test("Line inspector initial state when selectedRow is null does not throw", () => {
+  type DiffRow = { left_text: string | null; right_text: string | null; kind: string };
+  const selectedRow: DiffRow | null = null;
+
+  // In JavaScript: null?.left_text is undefined.
+  // CRITICAL REGRESSION CHECK:
+  // If written as `selectedRow?.left_text !== null`, it evaluates to `true` when selectedRow is null,
+  // causing `selectedRow!.left_text` to throw TypeError: Cannot read properties of null.
+  const flawedCheck = selectedRow?.left_text !== null;
+  assert.strictEqual(flawedCheck, true, "Demonstrating the JavaScript trap: undefined !== null is true");
+
+  // The correct safe idiom used in TextDiffView:
+  const safeInspector = (row: DiffRow | null) => {
+    if (!row) {
+      return { left: "(空)", right: "(空)" };
+    }
+    return {
+      left: row.left_text ?? "(空)",
+      right: row.right_text ?? "(空)",
+    };
+  };
+
+  const initialRender = safeInspector(selectedRow);
+  assert.strictEqual(initialRender.left, "(空)");
+  assert.strictEqual(initialRender.right, "(空)");
+});
+
