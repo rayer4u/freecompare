@@ -1,4 +1,4 @@
-import { Component, createEffect, createMemo, createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore } from "solid-js/store";
 import { callRustRpc, StartupLaunchSessionDto, UserPreferencesDto } from "./bridge";
 import { SessionTabKind, WorkspaceTab } from "./types";
@@ -90,10 +90,30 @@ export const App: Component = () => {
       }
     };
 
+    // 0. Kernel-level SSE long-lived connection for instantaneous window close detection
+    let eventSource: EventSource | null = null;
+    try {
+      if (typeof EventSource !== "undefined") {
+        eventSource = new EventSource("/api/events");
+        eventSource.onerror = () => {
+          // EventSource will automatically attempt to reconnect if connection drops
+        };
+      }
+    } catch {
+      // Ignore if not supported in test environment
+    }
+
     const heartbeatTimer = window.setInterval(() => {
       fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
       syncWindowGeometry();
     }, 1500);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     let resizeDebounce: number | undefined;
     const handleResize = () => {
@@ -111,6 +131,9 @@ export const App: Component = () => {
     window.addEventListener("keydown", handleGlobalShortcuts);
 
     const handlePageHide = () => {
+      try {
+        eventSource?.close();
+      } catch {}
       const payload = JSON.stringify(collectWindowGeometry(false));
       if (navigator.sendBeacon) {
         navigator.sendBeacon("/api/shutdown", payload);
@@ -124,6 +147,18 @@ export const App: Component = () => {
     };
     window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("beforeunload", handlePageHide);
+
+    onCleanup(() => {
+      try {
+        eventSource?.close();
+      } catch {}
+      window.clearInterval(heartbeatTimer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("keydown", handleGlobalShortcuts);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+    });
 
     const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
     if (prefs?.theme === "light" || prefs?.theme === "dark") {
@@ -215,6 +250,7 @@ export const App: Component = () => {
     return () => {
       window.removeEventListener("keydown", handleGlobalKeyDown);
       window.clearInterval(heartbeatTimer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("beforeunload", handlePageHide);

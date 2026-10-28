@@ -2,6 +2,7 @@ import { Component, createMemo, createSignal, onCleanup, onMount, Show, For } fr
 import {
   callRustRpc,
   CompareBackendClient,
+  computeInlineSegments,
   ReadTextFileResult,
   UserPreferencesDto,
   ViewRowFilter,
@@ -181,6 +182,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const [activeHunkIdx, setActiveHunkIdx] = createSignal<number>(0);
   const [selectedRow, setSelectedRow] = createSignal<ViewportRowDto | null>(null);
   const [scrollTriggerRow, setScrollTriggerRow] = createSignal<number | null>(null);
+  const [isDiffing, setIsDiffing] = createSignal(false);
   const [toastMsg, setToastMsg] = createSignal<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -448,6 +450,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       return;
     }
 
+    setIsDiffing(true);
     try {
       const loaded = await CompareBackendClient.loadRealDiskFiles(
         props.sessionId,
@@ -490,6 +493,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsDiffing(false);
     }
   };
 
@@ -816,6 +821,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
 
   return (
     <div class="view-container">
+      <Show when={isDiffing()}>
+        <div class="diff-computing-banner">
+          <span class="diff-spinner"></span>
+          <span>{t("common.loading")}</span>
+        </div>
+      </Show>
       {/* Beyond Compare Style Action Toolbar (Clean & Slimmed) */}
       <div class="bc-toolbar">
         {/* 1. 视图过滤分段按钮 (全部 / ≠ 差异 / ＝ 相同) */}
@@ -888,6 +899,19 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             title={t("text_diff.view_rules_tip")}
           >
             {t("text_diff.view_rules_btn")} ▾
+          </button>
+          <button
+            class={`bc-tool-btn ${showLineInspector() ? "active" : ""}`}
+            onClick={() => {
+              const next = !showLineInspector();
+              setShowLineInspector(next);
+              callRustRpc("update_user_preferences", {
+                show_line_inspector: next,
+              }).catch(() => {});
+            }}
+            title={t("text_diff.line_inspector_tip")}
+          >
+            {t("text_diff.line_inspector")}
           </button>
         </div>
 
@@ -1107,7 +1131,17 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           onPasteToSide={handlePasteTextToSide}
           onSelectRow={(row) => {
             setAllSelectedSide(null);
-            setSelectedRow(row);
+            if (
+              row.status === "modified" &&
+              (!row.left_inline?.length || !row.right_inline?.length) &&
+              row.left_text !== null &&
+              row.right_text !== null
+            ) {
+              const [lIn, rIn] = computeInlineSegments(row.left_text, row.right_text);
+              row.left_inline = lIn;
+              row.right_inline = rIn;
+            }
+            setSelectedRow({ ...row });
             if (row.hunk_id !== null) {
               const idx = summary().hunks.findIndex((h) => h.id === row.hunk_id);
               if (idx >= 0) setActiveHunkIdx(idx);
@@ -1133,18 +1167,39 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             <span>
               {t("text_diff.inspector_header")}
             </span>
-            <Show when={selectedRow()}>
-              {(row) => (
-                <span class="inspector-coords">
-                  {t("text_diff.inspector_coords", {
-                    side: focusedSide() === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
-                    virtual: row().virtual_idx + 1,
-                    left: row().left_line_no ?? "Gap",
-                    right: row().right_line_no ?? "Gap",
-                  })}
-                </span>
-              )}
-            </Show>
+            <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
+              <Show when={selectedRow()}>
+                {(row) => (
+                  <span class="inspector-coords">
+                    {t("text_diff.inspector_coords", {
+                      side: focusedSide() === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+                      virtual: row().virtual_idx + 1,
+                      left: row().left_line_no ?? "Gap",
+                      right: row().right_line_no ?? "Gap",
+                    })}
+                  </span>
+                )}
+              </Show>
+              <button
+                style={{
+                  cursor: "pointer",
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-muted)",
+                  "font-size": "12px",
+                  padding: "0 4px",
+                }}
+                onClick={() => {
+                  setShowLineInspector(false);
+                  callRustRpc("update_user_preferences", {
+                    show_line_inspector: false,
+                  }).catch(() => {});
+                }}
+                title={t("common.close")}
+              >
+                ✕
+              </button>
+            </div>
           </div>
           <div class="inspector-rows">
             <div class="inspector-line left-detail">
@@ -1152,7 +1207,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <code class="inspector-code">
                 <Show
                   when={selectedRow()?.left_inline?.length}
-                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                  fallback={
+                    <Show
+                      when={selectedRow()?.left_text !== null}
+                      fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                    >
+                      <span>{selectedRow()!.left_text}</span>
+                    </Show>
+                  }
                 >
                   <For each={selectedRow()!.left_inline}>
                     {(seg) => (
@@ -1169,7 +1231,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <code class="inspector-code">
                 <Show
                   when={selectedRow()?.right_inline?.length}
-                  fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                  fallback={
+                    <Show
+                      when={selectedRow()?.right_text !== null}
+                      fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
+                    >
+                      <span>{selectedRow()!.right_text}</span>
+                    </Show>
+                  }
                 >
                   <For each={selectedRow()!.right_inline}>
                     {(seg) => (

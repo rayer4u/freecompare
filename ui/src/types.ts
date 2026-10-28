@@ -3,6 +3,7 @@
 export type DiffStatus = "equal" | "modified" | "inserted" | "deleted";
 export type InlineTag = "equal" | "delete" | "insert";
 export type MergeDirection = "left_to_right" | "right_to_left";
+export type DiffRowFilter = "all" | "diffs" | "equals";
 
 export interface DiffOptions {
   ignore_whitespace: boolean;

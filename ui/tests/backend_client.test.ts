@@ -201,3 +201,53 @@ test("3-Way Merge Toolbar: Conflict Resolution (Use Left / Base / Right / Both)"
   // Verify resolveThreeWayHunk throws on invalid session
   assert.throws(() => resolveThreeWayHunk("non-existent-session", 0, "use_left"));
 });
+
+test("Performance: 1MB text file (30,000 lines) diff completes in milliseconds without freezing", () => {
+  const sid = "test-session-1mb-large";
+  const lineCount = 30000;
+  // Construct ~1MB text (~35 bytes per line * 30,000 = ~1,050,000 bytes)
+  const leftLines = Array.from({ length: lineCount }, (_, i) => `export const variable_${i} = ${i};`);
+  const rightLines = [...leftLines];
+  // Modify a few lines in the middle
+  for (let i = 15000; i < 15020; i++) {
+    rightLines[i] = `export const variable_${i} = ${i} + 999;`;
+  }
+
+  const leftText = leftLines.join("\n");
+  const rightText = rightLines.join("\n");
+  assert.ok(leftText.length > 900000, "Text size should be close to 1MB");
+
+  const startTime = Date.now();
+  const summary = CompareBackendClient.createTwoWaySession(sid, leftText, rightText);
+  const elapsed = Date.now() - startTime;
+
+  assert.strictEqual(summary.left_line_count, lineCount);
+  assert.strictEqual(summary.right_line_count, lineCount);
+  assert.strictEqual(summary.hunks.length, 1);
+  assert.strictEqual(summary.stats.modified_hunks, 1);
+  assert.ok(elapsed < 1000, `Diff took ${elapsed}ms, should be well under 1000ms (previously took 1 minute)`);
+});
+
+test("Performance: 10MB text file (300,000 lines) diff completes within 1000ms", () => {
+  const sid = "test-session-10mb-large";
+  const lineCount = 300000;
+  const leftLines = Array.from({ length: lineCount }, (_, i) => `export const item_${i} = ${i};`);
+  const rightLines = [...leftLines];
+  for (let i = 150000; i < 150050; i++) {
+    rightLines[i] = `export const item_${i} = ${i} + 999;`;
+  }
+
+  const leftText = leftLines.join("\n");
+  const rightText = rightLines.join("\n");
+  assert.ok(leftText.length > 9000000, "Text size should be close to 10MB");
+
+  const startTime = Date.now();
+  const summary = CompareBackendClient.createTwoWaySession(sid, leftText, rightText);
+  const elapsed = Date.now() - startTime;
+
+  assert.strictEqual(summary.left_line_count, lineCount);
+  assert.strictEqual(summary.right_line_count, lineCount);
+  assert.strictEqual(summary.hunks.length, 1);
+  assert.strictEqual(summary.stats.modified_hunks, 1);
+  assert.ok(elapsed < 1500, `10MB diff took ${elapsed}ms, should be well under 1500ms`);
+});

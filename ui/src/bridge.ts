@@ -1,6 +1,7 @@
 import type {
   ConflictResolution,
   DiffOptions,
+  DiffRowFilter as ViewRowFilter,
   DiffStats,
   DiffStatus,
   FolderDiffResult,
@@ -17,6 +18,14 @@ import type {
   ViewportRowDto,
   ViewportSliceDto,
 } from "./types.ts";
+import {
+  computeInlineSegments,
+  computeTwoWayDiffCore,
+  type DiffComputationResult,
+} from "./diff_core.ts";
+import { computeDiffAsync } from "./diff_worker_client.ts";
+
+export { computeInlineSegments };
 
 declare global {
   interface Window {
@@ -171,160 +180,13 @@ function tokenizeLine(line: string): SyntaxToken[] {
   return tokens;
 }
 
-function splitLexicalTokens(line: string): string[] {
-  return line.match(/[A-Za-z0-9_]+|\s+|[^\w\s]/g) ?? [];
-}
 
-function lineSimilarity(a: string, b: string): number {
-  const at = a.trim();
-  const bt = b.trim();
-  if (!at && !bt) return 1.0;
-  if (!at || !bt) return 0.0;
-  if (at === bt) return 1.0;
-  const aComment = at.startsWith("//") || at.startsWith("#");
-  const bComment = bt.startsWith("//") || bt.startsWith("#");
-  if (aComment !== bComment) return 0.0;
 
-  if (at.length === 1 || bt.length === 1) {
-    return at[0] === bt[0] ? 0.5 : 0.0;
-  }
 
-  const aBigrams: string[] = [];
-  const bBigrams: string[] = [];
-  for (let i = 0; i < at.length - 1; i++) aBigrams.push(at.slice(i, i + 2));
-  for (let i = 0; i < bt.length - 1; i++) bBigrams.push(bt.slice(i, i + 2));
-  aBigrams.sort();
-  bBigrams.sort();
 
-  let matches = 0;
-  let ia = 0;
-  let ib = 0;
-  while (ia < aBigrams.length && ib < bBigrams.length) {
-    if (aBigrams[ia] === bBigrams[ib]) {
-      matches++;
-      ia++;
-      ib++;
-    } else if (aBigrams[ia] < bBigrams[ib]) {
-      ia++;
-    } else {
-      ib++;
-    }
-  }
-  return (2.0 * matches) / (aBigrams.length + bBigrams.length);
-}
 
-function pushCoalescedSeg(
-  arr: InlineSegment[],
-  tag: "equal" | "delete" | "insert",
-  text: string
-) {
-  if (!text) return;
-  const last = arr[arr.length - 1];
-  if (last && last.tag === tag) {
-    last.text += text;
-  } else {
-    arr.push({ text, tag });
-  }
-}
 
-function computeInlineSegments(
-  left: string,
-  right: string
-): [InlineSegment[], InlineSegment[]] {
-  const lToks = splitLexicalTokens(left);
-  const rToks = splitLexicalTokens(right);
-  const n = lToks.length;
-  const m = rToks.length;
-
-  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      if (lToks[i] === rToks[j]) {
-        dp[i][j] = dp[i + 1][j + 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
-      }
-    }
-  }
-
-  const lSegs: InlineSegment[] = [];
-  const rSegs: InlineSegment[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (lToks[i] === rToks[j]) {
-      pushCoalescedSeg(lSegs, "equal", lToks[i]);
-      pushCoalescedSeg(rSegs, "equal", rToks[j]);
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      pushCoalescedSeg(lSegs, "delete", lToks[i++]);
-    } else {
-      pushCoalescedSeg(rSegs, "insert", rToks[j++]);
-    }
-  }
-  while (i < n) pushCoalescedSeg(lSegs, "delete", lToks[i++]);
-  while (j < m) pushCoalescedSeg(rSegs, "insert", rToks[j++]);
-
-  return [lSegs, rSegs];
-}
-
-function alignIntraHunkLines(
-  L: string[],
-  R: string[],
-  delIndices: number[],
-  insIndices: number[]
-): Array<[number | null, number | null]> {
-  const n = delIndices.length;
-  const m = insIndices.length;
-  if (n === 0) return insIndices.map((r) => [null, r]);
-  if (m === 0) return delIndices.map((l) => [l, null]);
-
-  const cols = m + 1;
-  const dp = new Float64Array((n + 1) * cols);
-  const choice = new Uint8Array((n + 1) * cols);
-
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      const sim = lineSimilarity(L[delIndices[i]], R[insIndices[j]]);
-      let bestScore = dp[(i + 1) * cols + j];
-      let bestAct = 2; // Delete
-      const insScore = dp[i * cols + (j + 1)];
-      if (insScore > bestScore) {
-        bestScore = insScore;
-        bestAct = 3; // Insert
-      }
-      if (sim >= 0.38) {
-        const pairScore = sim + dp[(i + 1) * cols + (j + 1)];
-        if (pairScore >= bestScore) {
-          bestScore = pairScore;
-          bestAct = 1; // Pair as Modified
-        }
-      }
-      dp[i * cols + j] = bestScore;
-      choice[i * cols + j] = bestAct;
-    }
-  }
-
-  const pairs: Array<[number | null, number | null]> = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    const act = choice[i * cols + j];
-    if (act === 1) {
-      pairs.push([delIndices[i++], insIndices[j++]]);
-    } else if (act === 2) {
-      pairs.push([delIndices[i++], null]);
-    } else {
-      pairs.push([null, insIndices[j++]]);
-    }
-  }
-  while (i < n) pairs.push([delIndices[i++], null]);
-  while (j < m) pairs.push([null, insIndices[j++]]);
-  return pairs;
-}
-
-export type ViewRowFilter = "all" | "diffs" | "equals";
+export type { ViewRowFilter };
 
 interface LocalTwoWayState {
   leftLines: string[];
@@ -345,170 +207,19 @@ interface LocalTwoWayState {
 
 const localTwoWayStore = new Map<string, LocalTwoWayState>();
 
-function normalizeLine(line: string, opts: DiffOptions): string {
-  let s = opts.ignore_whitespace ? line.trim().replace(/\s+/g, " ") : line;
-  if (opts.ignore_case) s = s.toLowerCase();
-  return s;
-}
+
 
 function recomputeLocalTwoWay(state: LocalTwoWayState): void {
-  const L = state.leftLines;
-  const R = state.rightLines;
-  const n = L.length;
-  const m = R.length;
-
-  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    const nl = normalizeLine(L[i], state.options);
-    for (let j = m - 1; j >= 0; j--) {
-      if (nl === normalizeLine(R[j], state.options)) {
-        dp[i][j] = dp[i + 1][j + 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
-      }
-    }
-  }
-
-  type Op =
-    | { type: "eq"; l: number; r: number }
-    | { type: "del"; l: number }
-    | { type: "ins"; r: number };
-  const ops: Op[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (normalizeLine(L[i], state.options) === normalizeLine(R[j], state.options)) {
-      ops.push({ type: "eq", l: i++, r: j++ });
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: "del", l: i++ });
-    } else {
-      ops.push({ type: "ins", r: j++ });
-    }
-  }
-  while (i < n) ops.push({ type: "del", l: i++ });
-  while (j < m) ops.push({ type: "ins", r: j++ });
-
-  const allRows: ViewportRowDto[] = [];
-  const hunks: TwoWayHunk[] = [];
-  const stats: DiffStats = {
-    modified_hunks: 0,
-    inserted_hunks: 0,
-    deleted_hunks: 0,
-    equal_lines: 0,
-    diff_lines: 0,
-  };
-
-  let k = 0;
-  while (k < ops.length) {
-    const op = ops[k];
-    if (op.type === "eq") {
-      const lText = L[op.l];
-      const rText = R[op.r];
-      allRows.push({
-        virtual_idx: allRows.length,
-        left_line_no: op.l + 1,
-        right_line_no: op.r + 1,
-        left_text: lText,
-        right_text: rText,
-        status: "equal",
-        hunk_id: null,
-        left_inline: [{ text: lText, tag: "equal" }],
-        right_inline: [{ text: rText, tag: "equal" }],
-        left_tokens: tokenizeLine(lText),
-        right_tokens: tokenizeLine(rText),
-      });
-      stats.equal_lines++;
-      k++;
-    } else {
-      const delIndices: number[] = [];
-      const insIndices: number[] = [];
-      while (k < ops.length && ops[k].type !== "eq") {
-        const cur = ops[k];
-        if (cur.type === "del") delIndices.push(cur.l);
-        if (cur.type === "ins") insIndices.push(cur.r);
-        k++;
-      }
-
-      const hunkId = hunks.length;
-      const vStart = allRows.length;
-      let hunkStatus: DiffStatus = "modified";
-      if (delIndices.length > 0 && insIndices.length > 0) {
-        hunkStatus = "modified";
-        stats.modified_hunks++;
-      } else if (delIndices.length === 0) {
-        hunkStatus = "inserted";
-        stats.inserted_hunks++;
-      } else {
-        hunkStatus = "deleted";
-        stats.deleted_hunks++;
-      }
-
-      const pairedRows = alignIntraHunkLines(L, R, delIndices, insIndices);
-      for (const [lIdx, rIdx] of pairedRows) {
-        const lText = lIdx !== null ? L[lIdx] : null;
-        const rText = rIdx !== null ? R[rIdx] : null;
-
-        let rowStatus: DiffStatus = "modified";
-        let lInline: InlineSegment[] = [];
-        let rInline: InlineSegment[] = [];
-
-        if (lText !== null && rText !== null) {
-          rowStatus = "modified";
-          [lInline, rInline] = computeInlineSegments(lText, rText);
-        } else if (lText !== null) {
-          rowStatus = "deleted";
-          lInline = [{ text: lText, tag: "delete" }];
-        } else if (rText !== null) {
-          rowStatus = "inserted";
-          rInline = [{ text: rText, tag: "insert" }];
-        }
-
-        allRows.push({
-          virtual_idx: allRows.length,
-          left_line_no: lIdx !== null ? lIdx + 1 : null,
-          right_line_no: rIdx !== null ? rIdx + 1 : null,
-          left_text: lText,
-          right_text: rText,
-          status: rowStatus,
-          hunk_id: hunkId,
-          left_inline: lInline,
-          right_inline: rInline,
-          left_tokens: lText ? tokenizeLine(lText) : [],
-          right_tokens: rText ? tokenizeLine(rText) : [],
-        });
-        stats.diff_lines++;
-      }
-
-      const lStart = delIndices.length > 0 ? delIndices[0] : (insIndices[0] ?? 0);
-      const lEnd = delIndices.length > 0 ? delIndices[delIndices.length - 1] + 1 : lStart;
-      const rStart = insIndices.length > 0 ? insIndices[0] : (delIndices[0] ?? 0);
-      const rEnd = insIndices.length > 0 ? insIndices[insIndices.length - 1] + 1 : rStart;
-
-      hunks.push({
-        id: hunkId,
-        status: hunkStatus,
-        virtual_start: vStart,
-        virtual_end: allRows.length,
-        left_range: { start: lStart, end: lEnd },
-        right_range: { start: rStart, end: rEnd },
-      });
-    }
-  }
-
-  state.allRows = allRows;
-  if (state.rowFilter === "diffs" || state.options.show_only_diffs) {
-    state.visibleRows = allRows
-      .filter((r) => r.status !== "equal")
-      .map((r, idx) => ({ ...r, virtual_idx: idx }));
-  } else if (state.rowFilter === "equals") {
-    state.visibleRows = allRows
-      .filter((r) => r.status === "equal")
-      .map((r, idx) => ({ ...r, virtual_idx: idx }));
-  } else {
-    state.visibleRows = allRows;
-  }
-  state.hunks = hunks;
-  state.stats = stats;
+  const computed = computeTwoWayDiffCore(
+    state.leftLines,
+    state.rightLines,
+    state.options,
+    state.rowFilter
+  );
+  state.allRows = computed.allRows;
+  state.visibleRows = computed.visibleRows;
+  state.hunks = computed.hunks;
+  state.stats = computed.stats;
 }
 
 function summarizeLocalTwoWay(state: LocalTwoWayState): TwoWayDiffResult {
@@ -568,6 +279,44 @@ export class CompareBackendClient {
     return summarizeLocalTwoWay(state);
   }
 
+  static async createTwoWaySessionAsync(
+    sessionId: string,
+    leftContent: string = "",
+    rightContent: string = "",
+    options: DiffOptions = {
+      ignore_whitespace: false,
+      ignore_case: false,
+      show_only_diffs: false,
+      context_lines: 3,
+    }
+  ): Promise<TwoWayDiffResult> {
+    const computed = await computeDiffAsync(
+      sessionId,
+      leftContent,
+      rightContent,
+      options,
+      "all"
+    );
+    const state: LocalTwoWayState = {
+      leftLines: computed.leftLines,
+      rightLines: computed.rightLines,
+      leftUndo: [],
+      rightUndo: [],
+      leftRedo: [],
+      rightRedo: [],
+      leftDirty: false,
+      rightDirty: false,
+      options,
+      rowFilter: "all",
+      allRows: computed.allRows,
+      visibleRows: computed.visibleRows,
+      hunks: computed.hunks,
+      stats: computed.stats,
+    };
+    localTwoWayStore.set(sessionId, state);
+    return summarizeLocalTwoWay(state);
+  }
+
   static getViewportSlice(
     sessionId: string,
     startRow: number,
@@ -580,10 +329,41 @@ export class CompareBackendClient {
     const total = state.visibleRows.length;
     const s = Math.max(0, Math.min(startRow, total));
     const e = Math.min(total, s + count);
+    const rawRows = state.visibleRows.slice(s, e);
+    const rows = rawRows.map((r) => {
+      let lInline = r.left_inline;
+      let rInline = r.right_inline;
+      if (r.status === "equal") {
+        if (!lInline.length && r.left_text !== null) {
+          lInline = [{ text: r.left_text, tag: "equal" }];
+        }
+        if (!rInline.length && r.right_text !== null) {
+          rInline = [{ text: r.right_text, tag: "equal" }];
+        }
+      } else if (r.status === "modified" && !lInline.length && !rInline.length) {
+        if (r.left_text !== null && r.right_text !== null) {
+          [lInline, rInline] = computeInlineSegments(r.left_text, r.right_text);
+          r.left_inline = lInline;
+          r.right_inline = rInline;
+        }
+      }
+      const lTokens =
+        r.left_tokens.length || r.left_text === null ? r.left_tokens : tokenizeLine(r.left_text);
+      const rTokens =
+        r.right_tokens.length || r.right_text === null ? r.right_tokens : tokenizeLine(r.right_text);
+
+      return {
+        ...r,
+        left_inline: lInline,
+        right_inline: rInline,
+        left_tokens: lTokens,
+        right_tokens: rTokens,
+      };
+    });
     return {
       start_row: s,
       total_rows: total,
-      rows: state.visibleRows.slice(s, e),
+      rows,
     };
   }
 
@@ -793,7 +573,7 @@ export class CompareBackendClient {
 
     if (!leftRes && !rightRes) return null;
 
-    return CompareBackendClient.createTwoWaySession(
+    return CompareBackendClient.createTwoWaySessionAsync(
       sessionId,
       leftRes?.content ?? "",
       rightRes?.content ?? "",

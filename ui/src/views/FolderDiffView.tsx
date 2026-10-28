@@ -46,6 +46,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [filterStatus, setFilterStatus] = createSignal<FilterStatus>("all");
   const [searchQuery, setSearchQuery] = createSignal("");
   const [collapsedDirs, setCollapsedDirs] = createSignal<Set<string>>(new Set());
+  const [scannedDirs, setScannedDirs] = createSignal<Set<string>>(new Set());
   const [selectedRelPath, setSelectedRelPath] = createSignal<string | null>(null);
   const [compareMode, setCompareMode] = createSignal<"hash" | "fast">("hash");
   const [isRecursiveScan, setIsRecursiveScan] = createSignal(Boolean(props.expandAll));
@@ -84,6 +85,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       });
       if (res) {
         setFolderData(res);
+        setScannedDirs(new Set<string>());
         setLeftInput(res.left_root);
         setRightInput(res.right_root);
         // By default: collapse all subfolders so only the current level is shown initially!
@@ -125,6 +127,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
   const handleCompareSubfolder = async (subRel: string, recursive = false) => {
     notify(t("folder_diff.scanning_subdir", { path: subRel }));
+    setScannedDirs((prev) => new Set(prev).add(subRel));
     try {
       const res = await callRustRpc<FolderSubtreeResult>("compare_subfolder", {
         left_dir: folderData().left_root,
@@ -185,9 +188,21 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             count: res.entries.length,
           })
         );
+      } else {
+        notify(t("folder_diff.err_scan"));
+        setCollapsedDirs((prev) => {
+          const next = new Set(prev);
+          next.delete(subRel);
+          return next;
+        });
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : String(err));
+      setCollapsedDirs((prev) => {
+        const next = new Set(prev);
+        next.delete(subRel);
+        return next;
+      });
     }
   };
 
@@ -327,7 +342,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       const hasChildren = folderData().entries.some((e) =>
         e.relative_path.startsWith(prefix)
       );
-      if (!hasChildren) {
+      if (!hasChildren && !scannedDirs().has(relPath)) {
         await handleCompareSubfolder(relPath, isRecursiveScan());
         return;
       }

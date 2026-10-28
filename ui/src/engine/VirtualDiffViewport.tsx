@@ -285,13 +285,19 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
           <div class="diff-center-gutter">
             <svg
               class="gutter-svg-connectors"
-              width="68"
-              height={Math.max(props.totalRows * ROW_HEIGHT, viewportHeight())}
+              style={{
+                position: "absolute",
+                top: `${visibleRange().start * ROW_HEIGHT}px`,
+                left: "0",
+                width: "68px",
+                height: `${Math.max(1, visibleRange().count * ROW_HEIGHT)}px`,
+                "pointer-events": "none",
+              }}
             >
               <For each={visibleHunks()}>
                 {(hunk) => {
-                  const y1 = hunk.virtual_start * ROW_HEIGHT;
-                  const y2 = hunk.virtual_end * ROW_HEIGHT;
+                  const y1 = (hunk.virtual_start - visibleRange().start) * ROW_HEIGHT;
+                  const y2 = (hunk.virtual_end - visibleRange().start) * ROW_HEIGHT;
                   const fill =
                     hunk.status === "modified"
                       ? "rgba(239, 68, 68, 0.22)"

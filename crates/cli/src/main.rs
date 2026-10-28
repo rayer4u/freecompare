@@ -14,7 +14,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,6 +23,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
 struct LifecycleTracker {
     client_connected: AtomicBool,
+    active_connections: AtomicUsize,
     last_heartbeat_ms: AtomicU64,
     shutdown_requested: AtomicBool,
 }
@@ -31,6 +32,7 @@ impl LifecycleTracker {
     fn new() -> Self {
         Self {
             client_connected: AtomicBool::new(false),
+            active_connections: AtomicUsize::new(0),
             last_heartbeat_ms: AtomicU64::new(now_ms()),
             shutdown_requested: AtomicBool::new(false),
         }
@@ -39,6 +41,8 @@ impl LifecycleTracker {
     fn touch(&self) {
         self.client_connected.store(true, Ordering::SeqCst);
         self.last_heartbeat_ms.store(now_ms(), Ordering::SeqCst);
+        // If a request or heartbeat arrives, the client is actively running (e.g. page was refreshed)
+        self.shutdown_requested.store(false, Ordering::SeqCst);
     }
 }
 
@@ -162,27 +166,25 @@ fn main() -> Result<()> {
         let backend_watchdog = Arc::clone(&backend);
         std::thread::spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_millis(500));
-                if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(1800));
-                    if now_ms()
-                        .saturating_sub(tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst))
-                        >= 1700
-                    {
-                        std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
-                    } else {
-                        tracker_watchdog
-                            .shutdown_requested
-                            .store(false, Ordering::SeqCst);
-                    }
+                std::thread::sleep(Duration::from_millis(300));
+                let active = tracker_watchdog.active_connections.load(Ordering::SeqCst);
+                let idle_ms = now_ms().saturating_sub(
+                    tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst),
+                );
+
+                // If at least one active SSE connection is open, the browser window is alive! Never kill!
+                if active > 0 {
+                    continue;
                 }
-                if tracker_watchdog.client_connected.load(Ordering::SeqCst) {
-                    let idle_ms = now_ms().saturating_sub(
-                        tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst),
-                    );
-                    if idle_ms > 4500 {
-                        std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
-                    }
+
+                // If explicit shutdown was requested (e.g. pagehide / tab close) and no active connections
+                if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) && idle_ms >= 600 {
+                    std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
+                }
+
+                // Fallback watchdog: if client connected before, but all connections have closed and stayed 0 for 1200ms
+                if tracker_watchdog.client_connected.load(Ordering::SeqCst) && idle_ms >= 1200 {
+                    std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
                 }
             }
         });
@@ -625,6 +627,34 @@ fn handle_http_connection(
         return write_json_response(&mut stream, 200, &json!({ "ok": true }));
     }
 
+    if path == "/api/events" {
+        let sse_header = "HTTP/1.1 200 OK\r\n\
+                          Content-Type: text/event-stream; charset=utf-8\r\n\
+                          Cache-Control: no-cache, no-transform\r\n\
+                          Connection: keep-alive\r\n\
+                          Access-Control-Allow-Origin: *\r\n\r\n\
+                          : ping\n\n";
+        if stream.write_all(sse_header.as_bytes()).is_err() {
+            return Ok(());
+        }
+        let _ = stream.flush();
+        tracker.active_connections.fetch_add(1, Ordering::SeqCst);
+        tracker.touch();
+
+        // Hold connection until client disconnects (OS will send FIN/RST on window close)
+        let mut buf = [0u8; 128];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break, // EOF or socket closed by client
+                Ok(_) => {}
+            }
+        }
+
+        tracker.active_connections.fetch_sub(1, Ordering::SeqCst);
+        tracker.last_heartbeat_ms.store(now_ms(), Ordering::SeqCst);
+        return Ok(());
+    }
+
     if path == "/api/heartbeat" {
         tracker.touch();
         return write_json_response(&mut stream, 200, &json!({ "ok": true }));
@@ -651,6 +681,7 @@ fn handle_http_connection(
             });
             return Ok(());
         }
+        tracker.last_heartbeat_ms.store(now_ms(), Ordering::SeqCst);
         tracker.shutdown_requested.store(true, Ordering::SeqCst);
         return write_json_response(&mut stream, 200, &json!({ "ok": true }));
     }
