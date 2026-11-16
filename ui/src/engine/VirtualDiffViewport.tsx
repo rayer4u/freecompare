@@ -8,6 +8,7 @@ import {
   ViewportRowDto,
 } from "../types";
 import { t } from "../i18n";
+import { formatGlyphText } from "../utils/preferences";
 
 export const ROW_HEIGHT = 24;
 export const OVERSCAN_ROWS = 12;
@@ -22,7 +23,9 @@ interface VirtualDiffViewportProps {
   activeHunkId: number | null;
   selectedRowIdx: number | null;
   editorFontSize?: number;
+  tabWidth?: number;
   showWhitespaceGlyphs?: boolean;
+  syntaxHighlighting?: boolean;
   fetchSlice: (startRow: number, count: number) => ViewportRowDto[];
   onFocusSide: (side: "left" | "right") => void;
   onPasteToSide: (isLeft: boolean, pastedText: string) => void;
@@ -30,6 +33,9 @@ interface VirtualDiffViewportProps {
   onMergeHunk: (hunkId: number, direction: MergeDirection) => void;
   onEditLine: (isLeft: boolean, lineNo1Based: number, newText: string) => void;
   scrollTriggerRow?: number | null;
+  scrollTriggerTick?: number;
+  activeSearchRowIdx?: number | null;
+  searchMatchSet?: Set<number>;
   onContextMenu?: (
     e: MouseEvent,
     row: ViewportRowDto | null,
@@ -65,6 +71,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
   });
 
   createEffect(() => {
+    void props.scrollTriggerTick;
     const targetRow = props.scrollTriggerRow;
     if (targetRow !== null && targetRow !== undefined && scrollContainerRef) {
       const targetTop = Math.max(0, targetRow * ROW_HEIGHT - viewportHeight() / 3);
@@ -207,6 +214,8 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
               <For each={visibleRows()}>
                 {(row) => {
                   const isSelected = () => props.selectedRowIdx === row.virtual_idx;
+                  const isSearchActive = () => props.activeSearchRowIdx === row.virtual_idx;
+                  const isSearchMatch = () => props.searchMatchSet?.has(row.virtual_idx) ?? false;
                   const isEditing = () =>
                     editingCell()?.isLeft === true &&
                     editingCell()?.virtualIdx === row.virtual_idx;
@@ -215,7 +224,13 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                     <div
                       class={`diff-row status-${row.status} ${
                         row.left_text === null ? "diff-row-gap" : ""
-                      } ${isSelected() ? "diff-row-selected" : ""}`}
+                      } ${isSelected() ? "diff-row-selected" : ""} ${
+                        isSearchActive()
+                          ? "diff-row-search-active"
+                          : isSearchMatch()
+                          ? "diff-row-search-match"
+                          : ""
+                      }`}
                       style={{ height: `${ROW_HEIGHT}px` }}
                       onClick={() => {
                         props.onFocusSide("left");
@@ -244,7 +259,10 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       </span>
                       <div
                         class="line-code-content"
-                        style={{ "font-size": `${props.editorFontSize ?? 13}px` }}
+                        style={{
+                          "font-size": `${props.editorFontSize ?? 13}px`,
+                          "tab-size": props.tabWidth ?? 4,
+                        }}
                       >
                         <Show
                           when={!isEditing()}
@@ -260,7 +278,11 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                               }
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") commitInlineEdit();
-                                if (e.key === "Escape") setEditingCell(null);
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setEditingCell(null);
+                                }
                               }}
                               onBlur={commitInlineEdit}
                             />
@@ -270,7 +292,9 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                             row.status,
                             row.left_inline,
                             row.left_tokens,
-                            props.showWhitespaceGlyphs
+                            props.showWhitespaceGlyphs,
+                            props.syntaxHighlighting ?? true,
+                            props.tabWidth ?? 4
                           )}
                         </Show>
                       </div>
@@ -400,6 +424,8 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
               <For each={visibleRows()}>
                 {(row) => {
                   const isSelected = () => props.selectedRowIdx === row.virtual_idx;
+                  const isSearchActive = () => props.activeSearchRowIdx === row.virtual_idx;
+                  const isSearchMatch = () => props.searchMatchSet?.has(row.virtual_idx) ?? false;
                   const isEditing = () =>
                     editingCell()?.isLeft === false &&
                     editingCell()?.virtualIdx === row.virtual_idx;
@@ -408,7 +434,13 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                     <div
                       class={`diff-row status-${row.status} ${
                         row.right_text === null ? "diff-row-gap" : ""
-                      } ${isSelected() ? "diff-row-selected" : ""}`}
+                      } ${isSelected() ? "diff-row-selected" : ""} ${
+                        isSearchActive()
+                          ? "diff-row-search-active"
+                          : isSearchMatch()
+                          ? "diff-row-search-match"
+                          : ""
+                      }`}
                       style={{ height: `${ROW_HEIGHT}px` }}
                       onClick={() => {
                         props.onFocusSide("right");
@@ -437,7 +469,10 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                       </span>
                       <div
                         class="line-code-content"
-                        style={{ "font-size": `${props.editorFontSize ?? 13}px` }}
+                        style={{
+                          "font-size": `${props.editorFontSize ?? 13}px`,
+                          "tab-size": props.tabWidth ?? 4,
+                        }}
                       >
                         <Show
                           when={!isEditing()}
@@ -453,7 +488,11 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                               }
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") commitInlineEdit();
-                                if (e.key === "Escape") setEditingCell(null);
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setEditingCell(null);
+                                }
                               }}
                               onBlur={commitInlineEdit}
                             />
@@ -463,7 +502,9 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                             row.status,
                             row.right_inline,
                             row.right_tokens,
-                            props.showWhitespaceGlyphs
+                            props.showWhitespaceGlyphs,
+                            props.syntaxHighlighting ?? true,
+                            props.tabWidth ?? 4
                           )}
                         </Show>
                       </div>
@@ -490,16 +531,13 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
   );
 };
 
-function formatGlyphText(text: string, showGlyphs?: boolean): string {
-  if (!showGlyphs) return text;
-  return text.replace(/ /g, "·").replace(/\t/g, "→   ");
-}
-
 function renderRichLine(
   status: DiffStatus,
   inlineSegs: InlineSegment[],
   syntaxTokens: SyntaxToken[],
-  showWhitespaceGlyphs?: boolean
+  showWhitespaceGlyphs?: boolean,
+  syntaxHighlighting = true,
+  tabWidth = 4
 ) {
   if (status !== "equal" && inlineSegs.length > 0) {
     return (
@@ -514,7 +552,7 @@ function renderRichLine(
                 : ""
             }
           >
-            {formatGlyphText(seg.text, showWhitespaceGlyphs)}
+            {formatGlyphText(seg.text, showWhitespaceGlyphs, tabWidth)}
           </span>
         )}
       </For>
@@ -524,8 +562,8 @@ function renderRichLine(
   return (
     <For each={syntaxTokens}>
       {(tok) => (
-        <span class={`tok-${tok.kind}`}>
-          {formatGlyphText(tok.text, showWhitespaceGlyphs)}
+        <span class={syntaxHighlighting ? `tok-${tok.kind}` : ""}>
+          {formatGlyphText(tok.text, showWhitespaceGlyphs, tabWidth)}
         </span>
       )}
     </For>

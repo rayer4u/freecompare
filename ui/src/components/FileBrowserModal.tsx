@@ -1,4 +1,4 @@
-import { Component, createSignal, For, onMount, Show } from "solid-js";
+import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { callRustRpc } from "../bridge";
 import { t } from "../i18n";
 
@@ -30,14 +30,19 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
   const [selectedItem, setSelectedItem] = createSignal<FsEntryDto | null>(null);
   const [showHidden, setShowHidden] = createSignal(false);
   const [errorMsg, setErrorMsg] = createSignal<string | null>(null);
+  let lastLoadedDir = (props.initialPath ?? "").trim();
 
   const loadDir = async (targetPath?: string) => {
     setErrorMsg(null);
+    if (targetPath !== undefined) {
+      lastLoadedDir = targetPath.trim();
+    }
     try {
       const res = await callRustRpc<FsListResponse>("list_local_dir", {
         dir_path: targetPath ?? null,
       });
       if (res) {
+        lastLoadedDir = res.current_dir;
         setCurrentDir(res.current_dir);
         setParentDir(res.parent_dir);
         setEntries(res.entries);
@@ -50,8 +55,21 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
     }
   };
 
+  const handleModalKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onClose();
+    }
+  };
+
   onMount(() => {
+    document.addEventListener("keydown", handleModalKeyDown, true);
     loadDir(props.initialPath);
+  });
+
+  onCleanup(() => {
+    document.removeEventListener("keydown", handleModalKeyDown, true);
   });
 
   const visibleEntries = () =>
@@ -98,6 +116,12 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
             value={currentDir()}
             onInput={(e) => setCurrentDir(e.currentTarget.value)}
             onKeyDown={(e) => e.key === "Enter" && loadDir(currentDir())}
+            onBlur={() => {
+              const cur = currentDir().trim();
+              if (cur && cur !== lastLoadedDir) {
+                loadDir(cur);
+              }
+            }}
           />
           <button class="bc-tool-btn" onClick={() => loadDir(currentDir())}>
             {t("file_browser.go")}

@@ -103,3 +103,41 @@ test("DOM Menu Interaction: Context Menu Lifecycle & Dismissal", () => {
 
   window.removeEventListener("click", dismissMenus);
 });
+
+
+test("Shift+Escape from child view bubbles to App global reject handler", () => {
+  const win = new Window();
+  const doc = win.document;
+  let childClosed = false;
+  let globalRejected = false;
+
+  doc.addEventListener("keydown", (e: any) => {
+    if (e.key === "Escape") {
+      if (e.shiftKey) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      childClosed = true;
+    }
+  });
+
+  win.addEventListener("keydown", (e: any) => {
+    if (e.defaultPrevented) return;
+    if (e.key === "Escape" && e.shiftKey) {
+      e.preventDefault();
+      globalRejected = true;
+    }
+  });
+
+  const shiftEsc = new win.KeyboardEvent("keydown", {
+    key: "Escape",
+    shiftKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  doc.body.dispatchEvent(shiftEsc);
+
+  assert.equal(childClosed, false);
+  assert.equal(globalRejected, true);
+});

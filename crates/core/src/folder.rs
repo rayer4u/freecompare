@@ -1,4 +1,5 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -253,7 +254,22 @@ fn compare_dir_recursive(
         b_dir.cmp(&a_dir).then_with(|| a.cmp(b))
     });
 
+    let mut dir_keys = Vec::new();
+    let mut file_keys = Vec::new();
     for key in all_keys {
+        let is_dir = left_map
+            .get(&key)
+            .map(|m| m.is_dir)
+            .or_else(|| right_map.get(&key).map(|m| m.is_dir))
+            .unwrap_or(false);
+        if is_dir {
+            dir_keys.push(key);
+        } else {
+            file_keys.push(key);
+        }
+    }
+
+    for key in dir_keys {
         let l_meta = left_map.get(&key);
         let r_meta = right_map.get(&key);
 
@@ -269,88 +285,101 @@ fn compare_dir_recursive(
         };
         let normalized_rel = child_rel.to_string_lossy().replace('\\', "/");
 
-        let is_dir = l_meta
-            .map(|m| m.is_dir)
-            .or_else(|| r_meta.map(|m| m.is_dir))
-            .unwrap_or(false);
+        let dir_idx = out.len();
+        let should_recurse =
+            options.recursive || options.max_depth.map_or(false, |md| depth < md);
 
-        if is_dir {
-            let dir_idx = out.len();
-            let should_recurse =
-                options.recursive || options.max_depth.map_or(false, |md| depth < md);
-
-            let initial_status = match (l_meta.is_some(), r_meta.is_some()) {
-                (true, true) => {
-                    if should_recurse {
-                        FolderItemStatus::Equal
-                    } else {
-                        FolderItemStatus::Unknown
-                    }
-                }
-                (true, false) => FolderItemStatus::LeftOnly,
-                (false, true) => FolderItemStatus::RightOnly,
-                (false, false) => FolderItemStatus::Equal,
-            };
-
-            out.push(FolderEntryDto {
-                relative_path: normalized_rel,
-                name: display_name,
-                is_dir: true,
-                depth,
-                status: initial_status,
-                left_size: None,
-                right_size: None,
-                left_modified_ms: l_meta.map(|m| m.modified_ms),
-                right_modified_ms: r_meta.map(|m| m.modified_ms),
-            });
-
-            if should_recurse {
-                let child_start = out.len();
-                compare_dir_recursive(
-                    left_root,
-                    right_root,
-                    &child_rel,
-                    depth + 1,
-                    options,
-                    glob_set,
-                    out,
-                    stats,
-                )?;
-
-                // Propagate child differences upward to parent directory status
-                if initial_status == FolderItemStatus::Equal {
-                    let has_diff_child = out[child_start..]
-                        .iter()
-                        .any(|c| c.status != FolderItemStatus::Equal);
-                    if has_diff_child {
-                        out[dir_idx].status = FolderItemStatus::Modified;
-                    }
+        let initial_status = match (l_meta.is_some(), r_meta.is_some()) {
+            (true, true) => {
+                if should_recurse {
+                    FolderItemStatus::Equal
+                } else {
+                    FolderItemStatus::Unknown
                 }
             }
-        } else {
+            (true, false) => FolderItemStatus::LeftOnly,
+            (false, true) => FolderItemStatus::RightOnly,
+            (false, false) => FolderItemStatus::Equal,
+        };
+
+        out.push(FolderEntryDto {
+            relative_path: normalized_rel,
+            name: display_name,
+            is_dir: true,
+            depth,
+            status: initial_status,
+            left_size: None,
+            right_size: None,
+            left_modified_ms: l_meta.map(|m| m.modified_ms),
+            right_modified_ms: r_meta.map(|m| m.modified_ms),
+        });
+
+        if should_recurse {
+            let child_start = out.len();
+            compare_dir_recursive(
+                left_root,
+                right_root,
+                &child_rel,
+                depth + 1,
+                options,
+                glob_set,
+                out,
+                stats,
+            )?;
+
+            // Propagate child differences upward to parent directory status
+            if initial_status == FolderItemStatus::Equal {
+                let has_diff_child = out[child_start..]
+                    .iter()
+                    .any(|c| c.status != FolderItemStatus::Equal);
+                if has_diff_child {
+                    out[dir_idx].status = FolderItemStatus::Modified;
+                }
+            }
+        }
+    }
+
+    // Compare same-level files in parallel using rayon so BLAKE3 streaming hashes scale across cores
+    let file_entries: Vec<FolderEntryDto> = file_keys
+        .par_iter()
+        .map(|key| {
+            let l_meta = left_map.get(key);
+            let r_meta = right_map.get(key);
+
+            let display_name = l_meta
+                .map(|m| m.name.clone())
+                .or_else(|| r_meta.map(|m| m.name.clone()))
+                .unwrap_or_else(|| key.clone());
+
+            let child_rel = if rel_dir.as_os_str().is_empty() {
+                PathBuf::from(&display_name)
+            } else {
+                rel_dir.join(&display_name)
+            };
+            let normalized_rel = child_rel.to_string_lossy().replace('\\', "/");
+
             let status = match (l_meta, r_meta) {
                 (Some(l), Some(r)) => {
-                    if files_equal(&l.path, l.size, l.modified_ms, &r.path, r.size, r.modified_ms, options.mode) {
-                        stats.equal_items += 1;
+                    if files_equal(
+                        &l.path,
+                        l.size,
+                        l.modified_ms,
+                        &r.path,
+                        r.size,
+                        r.modified_ms,
+                        options.mode,
+                    ) {
                         FolderItemStatus::Equal
                     } else {
-                        stats.modified_items += 1;
                         FolderItemStatus::Modified
                     }
                 }
-                (Some(_), None) => {
-                    stats.left_only_items += 1;
-                    FolderItemStatus::LeftOnly
-                }
-                (None, Some(_)) => {
-                    stats.right_only_items += 1;
-                    FolderItemStatus::RightOnly
-                }
+                (Some(_), None) => FolderItemStatus::LeftOnly,
+                (None, Some(_)) => FolderItemStatus::RightOnly,
                 (None, None) => FolderItemStatus::Equal,
             };
-            stats.total_items += 1;
 
-            out.push(FolderEntryDto {
+            FolderEntryDto {
                 relative_path: normalized_rel,
                 name: display_name,
                 is_dir: false,
@@ -360,8 +389,20 @@ fn compare_dir_recursive(
                 right_size: r_meta.map(|m| m.size),
                 left_modified_ms: l_meta.map(|m| m.modified_ms),
                 right_modified_ms: r_meta.map(|m| m.modified_ms),
-            });
+            }
+        })
+        .collect();
+
+    for entry in file_entries {
+        match entry.status {
+            FolderItemStatus::Equal => stats.equal_items += 1,
+            FolderItemStatus::Modified => stats.modified_items += 1,
+            FolderItemStatus::LeftOnly => stats.left_only_items += 1,
+            FolderItemStatus::RightOnly => stats.right_only_items += 1,
+            FolderItemStatus::Unknown => {}
         }
+        stats.total_items += 1;
+        out.push(entry);
     }
 
     Ok(())
@@ -436,15 +477,17 @@ fn files_equal(
     if mode == FolderCompareMode::FastMetadata {
         return left_mtime.abs_diff(right_mtime) < 2000;
     }
-    match (hash_file(left_path), hash_file(right_path)) {
+    match rayon::join(|| hash_file(left_path), || hash_file(right_path)) {
         (Ok(h1), Ok(h2)) => h1 == h2,
         _ => false,
     }
 }
 
 fn hash_file(path: &Path) -> std::io::Result<blake3::Hash> {
-    let bytes = fs::read(path)?;
-    Ok(blake3::hash(&bytes))
+    let mut file = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize())
 }
 
 fn build_exclude_globset(patterns: &[String]) -> GlobSet {

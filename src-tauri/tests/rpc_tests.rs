@@ -430,3 +430,122 @@ fn test_git_difftool_two_way_text_launch_and_rpc_lifecycle() {
         1
     );
 }
+
+#[test]
+fn test_write_text_file_preserves_encoding_and_line_endings_and_expand_path_rpcs() {
+    let dir = tempdir().unwrap();
+    let backend = AppBackend::new();
+
+    // 1. Existing GB18030 + CRLF file: `read_text_file` reports encoding & line_ending,
+    //    and `write_text_file` with LF-normalized UI payload preserves GB18030 + CRLF on disk!
+    let gbk_crlf_path = dir.path().join("gbk_crlf.txt");
+    let orig_gbk_crlf = freecompare_core::encode_string(
+        "第一行\r\n第二行\r\n",
+        freecompare_core::EncodingKind::Gb18030,
+    );
+    fs::write(&gbk_crlf_path, &orig_gbk_crlf).unwrap();
+
+    let read_res = backend
+        .dispatch_rpc(
+            "read_text_file",
+            &json!({ "path": gbk_crlf_path.to_string_lossy() }),
+        )
+        .unwrap();
+    assert_eq!(read_res["encoding"], "GB18030 / GBK");
+    assert_eq!(read_res["line_ending"], "CRLF (Windows)");
+    assert_eq!(read_res["content"], "第一行\n第二行\n");
+
+    backend
+        .dispatch_rpc(
+            "write_text_file",
+            &json!({
+                "path": gbk_crlf_path.to_string_lossy(),
+                "content": "第一行\n第二行_已编辑\n"
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(&gbk_crlf_path).unwrap(),
+        freecompare_core::encode_string(
+            "第一行\r\n第二行_已编辑\r\n",
+            freecompare_core::EncodingKind::Gb18030,
+        )
+    );
+
+    // 2. Existing UTF-16 LE + CR file preserved through `read_text_file` + `write_text_file`
+    let u16_cr_path = dir.path().join("u16_cr.txt");
+    fs::write(
+        &u16_cr_path,
+        freecompare_core::encode_string("alpha\rbeta\r", freecompare_core::EncodingKind::Utf16Le),
+    )
+    .unwrap();
+    let u16_read = backend
+        .dispatch_rpc(
+            "read_text_file",
+            &json!({ "path": u16_cr_path.to_string_lossy() }),
+        )
+        .unwrap();
+    assert_eq!(u16_read["encoding"], "UTF-16 LE");
+    assert_eq!(u16_read["line_ending"], "CR");
+
+    backend
+        .dispatch_rpc(
+            "write_text_file",
+            &json!({
+                "path": u16_cr_path.to_string_lossy(),
+                "content": "alpha\nbeta_2\n"
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(&u16_cr_path).unwrap(),
+        freecompare_core::encode_string("alpha\rbeta_2\r", freecompare_core::EncodingKind::Utf16Le)
+    );
+
+    // 3. `list_local_dir` expands `~` when HOME is available
+    if std::env::var("HOME").is_ok() {
+        let home_list = backend
+            .dispatch_rpc("list_local_dir", &json!({ "dir_path": "~" }))
+            .unwrap();
+        assert_eq!(
+            home_list["current_dir"].as_str().unwrap(),
+            freecompare_core::expand_path("~").to_string_lossy().as_ref()
+        );
+    }
+
+    // 4. `open_three_way_files` + `save_three_way_merged` with relative path & UTF-8 BOM + CRLF preservation
+    let base_p = dir.path().join("base.txt");
+    let left_p = dir.path().join("left.txt");
+    let right_p = dir.path().join("right.txt");
+    let out_p = dir.path().join("merged_bom.txt");
+    let bom_crlf = |s: &str| {
+        freecompare_core::encode_string(
+            &s.replace('\n', "\r\n"),
+            freecompare_core::EncodingKind::Utf8Bom,
+        )
+    };
+    fs::write(&base_p, bom_crlf("line1\nline2\nline3\n")).unwrap();
+    fs::write(&left_p, bom_crlf("line1_L\nline2\nline3\n")).unwrap();
+    fs::write(&right_p, bom_crlf("line1\nline2\nline3_R\n")).unwrap();
+
+    let open_3w = backend
+        .dispatch_rpc(
+            "open_three_way_files",
+            &json!({
+                "left_path": left_p.to_string_lossy(),
+                "base_path": base_p.to_string_lossy(),
+                "right_path": right_p.to_string_lossy(),
+                "output_path": out_p.to_string_lossy(),
+                "initial_row_count": 50
+            }),
+        )
+        .unwrap();
+    let sid = open_3w["session_id"].as_str().unwrap();
+    backend
+        .dispatch_rpc(
+            "save_three_way_merged",
+            &json!({ "session_id": sid, "target_path": "" }),
+        )
+        .unwrap();
+    assert_eq!(fs::read(&out_p).unwrap(), bom_crlf("line1_L\nline2\nline3_R\n"));
+}

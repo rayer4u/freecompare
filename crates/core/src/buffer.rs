@@ -32,6 +32,17 @@ impl EncodingKind {
             EncodingKind::Gb18030 => "GB18030 / GBK",
         }
     }
+
+    pub fn from_label_or_name(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "utf-8" | "utf8" => Some(EncodingKind::Utf8),
+            "utf-8 (bom)" | "utf-8-bom" | "utf8bom" | "utf8_bom" => Some(EncodingKind::Utf8Bom),
+            "utf-16 le" | "utf-16le" | "utf16le" | "utf16_le" => Some(EncodingKind::Utf16Le),
+            "utf-16 be" | "utf-16be" | "utf16be" | "utf16_be" => Some(EncodingKind::Utf16Be),
+            "gb18030 / gbk" | "gb18030" | "gbk" => Some(EncodingKind::Gb18030),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +69,26 @@ impl LineEnding {
             LineEnding::CrLf => "CRLF (Windows)",
             LineEnding::Cr => "CR",
             LineEnding::Mixed => "Mixed",
+        }
+    }
+
+    pub fn from_label_or_name(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "lf" | "lf (unix/macos)" | "unix" | "\\n" => Some(LineEnding::Lf),
+            "crlf" | "crlf (windows)" | "windows" | "\\r\\n" => Some(LineEnding::CrLf),
+            "cr" | "mac" | "\\r" => Some(LineEnding::Cr),
+            "mixed" => Some(LineEnding::Mixed),
+            _ => None,
+        }
+    }
+
+    /// Normalizes line endings in `text` and converts them to this `LineEnding`.
+    pub fn apply_to(&self, text: &str) -> String {
+        let normalized = normalize_line_endings(text);
+        match self {
+            LineEnding::CrLf => normalized.replace('\n', "\r\n"),
+            LineEnding::Cr => normalized.replace('\n', "\r"),
+            LineEnding::Lf | LineEnding::Mixed => normalized,
         }
     }
 }
@@ -301,7 +332,7 @@ impl TextBuffer {
     }
 }
 
-fn decode_bytes(bytes: &[u8]) -> (String, EncodingKind) {
+pub fn decode_bytes(bytes: &[u8]) -> (String, EncodingKind) {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         let (cow, _, _) = UTF_8.decode(&bytes[3..]);
         return (cow.into_owned(), EncodingKind::Utf8Bom);
@@ -323,7 +354,7 @@ fn decode_bytes(bytes: &[u8]) -> (String, EncodingKind) {
     (cow.into_owned(), EncodingKind::Gb18030)
 }
 
-fn encode_string(text: &str, encoding: EncodingKind) -> Vec<u8> {
+pub fn encode_string(text: &str, encoding: EncodingKind) -> Vec<u8> {
     match encoding {
         EncodingKind::Utf8 => text.as_bytes().to_vec(),
         EncodingKind::Utf8Bom => {
@@ -354,9 +385,11 @@ fn encode_string(text: &str, encoding: EncodingKind) -> Vec<u8> {
     }
 }
 
-fn detect_line_ending(text: &str) -> LineEnding {
+/// Detects line endings in `text`, returning `None` if no line ending characters exist.
+pub fn detect_line_ending_opt(text: &str) -> Option<LineEnding> {
     let mut crlf_count = 0usize;
     let mut lf_only_count = 0usize;
+    let mut cr_only_count = 0usize;
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -366,31 +399,63 @@ fn detect_line_ending(text: &str) -> LineEnding {
                 i += 2;
                 continue;
             }
+            cr_only_count += 1;
         } else if bytes[i] == b'\n' {
             lf_only_count += 1;
         }
         i += 1;
     }
 
-    match (crlf_count > 0, lf_only_count > 0) {
-        (true, false) => LineEnding::CrLf,
-        (false, true) => LineEnding::Lf,
-        (true, true) => LineEnding::Mixed,
-        (false, false) => {
-            if cfg!(windows) {
-                LineEnding::CrLf
-            } else {
-                LineEnding::Lf
-            }
-        }
+    match (crlf_count > 0, lf_only_count > 0, cr_only_count > 0) {
+        (true, false, false) => Some(LineEnding::CrLf),
+        (false, true, false) => Some(LineEnding::Lf),
+        (false, false, true) => Some(LineEnding::Cr),
+        (false, false, false) => None,
+        _ => Some(LineEnding::Mixed),
     }
 }
 
-fn normalize_line_endings(text: &str) -> String {
+pub fn detect_line_ending(text: &str) -> LineEnding {
+    detect_line_ending_opt(text).unwrap_or(if cfg!(windows) {
+        LineEnding::CrLf
+    } else {
+        LineEnding::Lf
+    })
+}
+
+/// Detects the encoding and optional line ending of an existing file on disk.
+pub fn detect_file_format(
+    path: impl AsRef<Path>,
+) -> Result<(EncodingKind, Option<LineEnding>), BufferError> {
+    let path_buf = expand_path(path);
+    let bytes = fs::read(&path_buf)?;
+    let (decoded, encoding) = decode_bytes(&bytes);
+    Ok((encoding, detect_line_ending_opt(&decoded)))
+}
+
+pub fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Expands user home directory (e.g. `~/path` or `~`) and resolves relative paths to absolute paths.
+fn resolve_home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+fn join_normalized_rel(base: PathBuf, rel: &str) -> PathBuf {
+    let mut out = base;
+    for comp in rel.split(['/', '\\']) {
+        if !comp.is_empty() && comp != "." {
+            out.push(comp);
+        }
+    }
+    out
+}
+
+/// Expands user home directory (e.g. `~/path`, `~`, `$HOME`, `%USERPROFILE%`) and resolves relative paths to absolute paths.
 pub fn expand_path(path: impl AsRef<Path>) -> PathBuf {
     let p = path.as_ref();
     let s = p.to_string_lossy();
@@ -398,17 +463,40 @@ pub fn expand_path(path: impl AsRef<Path>) -> PathBuf {
     if trimmed.is_empty() {
         return PathBuf::new();
     }
-    let expanded = if trimmed == "~" {
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("~"))
-    } else if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
-        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-            PathBuf::from(home).join(rest)
+
+    let expanded = if trimmed == "~"
+        || trimmed == "$HOME"
+        || trimmed == "${HOME}"
+        || trimmed.eq_ignore_ascii_case("%USERPROFILE%")
+    {
+        resolve_home_dir().unwrap_or_else(|| PathBuf::from(trimmed))
+    } else if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+        .or_else(|| trimmed.strip_prefix("$HOME/"))
+        .or_else(|| trimmed.strip_prefix("$HOME\\"))
+        .or_else(|| trimmed.strip_prefix("${HOME}/"))
+        .or_else(|| trimmed.strip_prefix("${HOME}\\"))
+        .or_else(|| {
+            let prefix = "%userprofile%";
+            if trimmed.len() > prefix.len()
+                && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+                && (trimmed.as_bytes()[prefix.len()] == b'/'
+                    || trimmed.as_bytes()[prefix.len()] == b'\\')
+            {
+                Some(&trimmed[prefix.len() + 1..])
+            } else {
+                None
+            }
+        })
+    {
+        if let Some(home) = resolve_home_dir() {
+            join_normalized_rel(home, rest)
         } else {
             PathBuf::from(trimmed)
         }
+    } else if cfg!(windows) {
+        PathBuf::from(trimmed.replace('/', "\\"))
     } else {
         PathBuf::from(trimmed)
     };

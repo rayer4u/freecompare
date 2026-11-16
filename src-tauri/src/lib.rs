@@ -5,16 +5,18 @@
 
 use freecompare_core::{
     cli_args::{exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode},
+    detect_file_format, detect_line_ending_opt,
     diff::{
         three_way::{ConflictResolution, ThreeWayDiffResult, ThreeWayRow, ThreeWaySession},
         two_way::{DiffOptions, MergeDirection, TwoWayDiffResult, TwoWaySession, ViewportSliceDto},
     },
-    expand_path,
+    encode_string, expand_path,
     folder::{
         apply_folder_item_operation, compare_folders, FolderCompareOptions,
         FolderDiffResult, FolderSyncActionKind,
     },
-    SessionKind, SessionManager, SessionRecord, StartupLaunchSession, TextBuffer, UserPreferences,
+    EncodingKind, LineEnding, SessionKind, SessionManager, SessionRecord, StartupLaunchSession,
+    TextBuffer, UserPreferences,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,6 +29,7 @@ pub struct ReadTextFileResponse {
     pub path: String,
     pub line_count: usize,
     pub encoding: String,
+    pub line_ending: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +141,7 @@ impl AppBackend {
                     output_path: inv
                         .merge_output
                         .as_ref()
-                        .map(|p| p.to_string_lossy().to_string()),
+                        .map(|p| expand_path(p).to_string_lossy().to_string()),
                     titles: inv.titles.clone(),
                     readonly: inv.readonly,
                     expand_all: inv.expand_all,
@@ -152,11 +155,12 @@ impl AppBackend {
             }
             1 => {
                 // Single path provided (right side optional!)
-                let left = canonical_or_display(&paths[0]);
+                let p0 = expand_path(&paths[0]);
+                let left = canonical_or_display(&p0);
                 let title = inv.titles[0]
                     .clone()
-                    .unwrap_or_else(|| file_name_label(&paths[0]));
-                let is_dir = paths[0].is_dir()
+                    .unwrap_or_else(|| file_name_label(&p0));
+                let is_dir = p0.is_dir()
                     || inv.forced_viewer == Some(ForcedViewerKind::FolderCompare);
                 let kind = if is_dir {
                     SessionKind::FolderCompare
@@ -183,17 +187,19 @@ impl AppBackend {
                 Ok(launch)
             }
             2 => {
-                let left = canonical_or_display(&paths[0]);
-                let right = canonical_or_display(&paths[1]);
+                let p0 = expand_path(&paths[0]);
+                let p1 = expand_path(&paths[1]);
+                let left = canonical_or_display(&p0);
+                let right = canonical_or_display(&p1);
                 let left_name = inv.titles[0]
                     .clone()
-                    .unwrap_or_else(|| file_name_label(&paths[0]));
+                    .unwrap_or_else(|| file_name_label(&p0));
                 let right_name = inv.titles[1]
                     .clone()
-                    .unwrap_or_else(|| file_name_label(&paths[1]));
+                    .unwrap_or_else(|| file_name_label(&p1));
                 let title = format!("{left_name} ↔ {right_name}");
 
-                let is_dir = (paths[0].is_dir() && paths[1].is_dir())
+                let is_dir = (p0.is_dir() && p1.is_dir())
                     || inv.forced_viewer == Some(ForcedViewerKind::FolderCompare);
 
                 if is_dir {
@@ -236,7 +242,7 @@ impl AppBackend {
                         output_path: inv
                             .merge_output
                             .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
+                            .map(|p| expand_path(p).to_string_lossy().to_string()),
                         titles: inv.titles.clone(),
                         readonly: inv.readonly,
                         expand_all: inv.expand_all,
@@ -252,17 +258,20 @@ impl AppBackend {
             _ => {
                 // 3 or 4 paths: Beyond Compare & Git mergetool standard ordering:
                 // path[0] = Left (LOCAL), path[1] = Right (REMOTE), path[2] = Center (BASE), path[3] = Output (MERGED)
-                let left = canonical_or_display(&paths[0]);
-                let right = canonical_or_display(&paths[1]);
-                let base = canonical_or_display(&paths[2]);
+                let p0 = expand_path(&paths[0]);
+                let p1 = expand_path(&paths[1]);
+                let p2 = expand_path(&paths[2]);
+                let left = canonical_or_display(&p0);
+                let right = canonical_or_display(&p1);
+                let base = canonical_or_display(&p2);
                 let out = inv
                     .resolved_merge_output_path()
-                    .map(|p| canonical_or_display(&p));
+                    .map(|p| canonical_or_display(&expand_path(p)));
 
                 let title = inv.titles[3]
                     .clone()
                     .or_else(|| inv.titles[0].clone())
-                    .unwrap_or_else(|| format!("3-Way: {}", file_name_label(&paths[0])));
+                    .unwrap_or_else(|| format!("3-Way: {}", file_name_label(&p0)));
 
                 let resp =
                     self.open_three_way_files(&left, &base, &right, out.clone(), 400)?;
@@ -330,14 +339,14 @@ impl AppBackend {
         if inv.paths.len() < 2 {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         }
-        let left = &inv.paths[0];
-        let right = &inv.paths[1];
+        let left = expand_path(&inv.paths[0]);
+        let right = expand_path(&inv.paths[1]);
         if !left.exists() || !right.exists() {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         }
 
         if left.is_dir() && right.is_dir() {
-            let Ok(res) = compare_folders(left, right, &FolderCompareOptions::default()) else {
+            let Ok(res) = compare_folders(&left, &right, &FolderCompareOptions::default()) else {
                 return exit_codes::ERROR_OR_MISSING_ARGS;
             };
             if res.stats.modified_items == 0
@@ -350,10 +359,10 @@ impl AppBackend {
         }
 
         let mode = inv.quick_compare.unwrap_or(QuickCompareMode::RulesBased);
-        let Ok(b1) = std::fs::read(left) else {
+        let Ok(b1) = std::fs::read(&left) else {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         };
-        let Ok(b2) = std::fs::read(right) else {
+        let Ok(b2) = std::fs::read(&right) else {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         };
 
@@ -376,7 +385,7 @@ impl AppBackend {
                 if b1 == b2 {
                     return exit_codes::BINARY_SAME;
                 }
-                let Ok(s_exact) = TwoWaySession::from_files(left, right, DiffOptions::default())
+                let Ok(s_exact) = TwoWaySession::from_files(&left, &right, DiffOptions::default())
                 else {
                     return exit_codes::ERROR_OR_MISSING_ARGS;
                 };
@@ -390,7 +399,7 @@ impl AppBackend {
                     show_only_diffs: false,
                     context_lines: 3,
                 };
-                if let Ok(s_relaxed) = TwoWaySession::from_files(left, right, relaxed_opts) {
+                if let Ok(s_relaxed) = TwoWaySession::from_files(&left, &right, relaxed_opts) {
                     if s_relaxed.summary().hunks.is_empty() {
                         return exit_codes::UNIMPORTANT_DIFF;
                     }
@@ -423,13 +432,13 @@ impl AppBackend {
     /// Lists local directory contents for the cross-platform File/Folder Browser Modal.
     pub fn list_local_dir(&self, dir_path: Option<&str>) -> Result<FsListResponse, String> {
         let target = match dir_path.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            Some(p) => PathBuf::from(p),
+            Some(p) => expand_path(p),
             None => self
                 .manager
                 .get_preferences()
                 .last_browsed_dir
                 .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
+                .map(expand_path)
                 .filter(|p| p.exists())
                 .or_else(|| std::env::current_dir().ok())
                 .or_else(|| {
@@ -508,15 +517,52 @@ impl AppBackend {
             path: expanded.to_string_lossy().to_string(),
             line_count: buffer.line_count(),
             encoding: buffer.encoding().label().to_string(),
+            line_ending: buffer.line_ending().label().to_string(),
         })
     }
 
     pub fn write_text_file(&self, path: &str, content: &str) -> Result<(), String> {
+        self.write_text_file_with_options(path, content, None, None)
+    }
+
+    pub fn write_text_file_with_options(
+        &self,
+        path: &str,
+        content: &str,
+        encoding: Option<&str>,
+        line_ending: Option<&str>,
+    ) -> Result<(), String> {
         let expanded = expand_path(path);
         if let Some(parent) = expanded.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
         }
-        std::fs::write(&expanded, content.as_bytes())
+
+        let existing_format = if expanded.is_file() {
+            detect_file_format(&expanded).ok()
+        } else {
+            None
+        };
+
+        let target_encoding = encoding
+            .and_then(EncodingKind::from_label_or_name)
+            .or_else(|| existing_format.map(|(enc, _)| enc))
+            .unwrap_or(EncodingKind::Utf8);
+
+        let target_line_ending = line_ending
+            .and_then(LineEnding::from_label_or_name)
+            .or_else(|| existing_format.and_then(|(_, le)| le))
+            .or_else(|| detect_line_ending_opt(content))
+            .unwrap_or(if cfg!(windows) {
+                LineEnding::CrLf
+            } else {
+                LineEnding::Lf
+            });
+
+        let formatted = target_line_ending.apply_to(content);
+        let bytes = encode_string(&formatted, target_encoding);
+        std::fs::write(&expanded, bytes)
             .map_err(|e| format!("无法保存文件 ({}): {}", expanded.display(), e))
     }
 
@@ -527,8 +573,12 @@ impl AppBackend {
         options: DiffOptions,
         initial_row_count: usize,
     ) -> Result<OpenTwoWayResponse, String> {
-        let session = TwoWaySession::from_files(left_path, right_path, options)
-            .map_err(|e| format!("无法读取文件 ({left_path} vs {right_path}): {e}"))?;
+        let left_expanded = expand_path(left_path);
+        let right_expanded = expand_path(right_path);
+        let left_str = left_expanded.to_string_lossy().to_string();
+        let right_str = right_expanded.to_string_lossy().to_string();
+        let session = TwoWaySession::from_files(&left_expanded, &right_expanded, options)
+            .map_err(|e| format!("无法读取文件 ({left_str} vs {right_str}): {e}"))?;
         let summary = session.summary();
         let initial_slice = session.get_viewport_slice(0, initial_row_count);
         let session_id = self.manager.allocate_id("text");
@@ -539,22 +589,22 @@ impl AppBackend {
 
         let title = format!(
             "{} ↔ {}",
-            file_name_label(Path::new(left_path)),
-            file_name_label(Path::new(right_path))
+            file_name_label(&left_expanded),
+            file_name_label(&right_expanded)
         );
         self.manager.record_recent(
             title,
             SessionKind::TwoWayText,
-            left_path.to_string(),
-            right_path.to_string(),
+            left_str.clone(),
+            right_str.clone(),
             None,
             None,
         );
 
         Ok(OpenTwoWayResponse {
             session_id,
-            left_path: left_path.to_string(),
-            right_path: right_path.to_string(),
+            left_path: left_str,
+            right_path: right_str,
             summary,
             initial_slice,
         })
@@ -698,9 +748,23 @@ impl AppBackend {
         output_path: Option<String>,
         initial_row_count: usize,
     ) -> Result<OpenThreeWayResponse, String> {
-        let out_buf = output_path.as_ref().map(PathBuf::from);
-        let session = ThreeWaySession::from_files(left_path, base_path, right_path, out_buf)
-            .map_err(|e| e.to_string())?;
+        let left_expanded = expand_path(left_path);
+        let base_expanded = expand_path(base_path);
+        let right_expanded = expand_path(right_path);
+        let out_buf = output_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(expand_path);
+        let out_str = out_buf.as_ref().map(|p| p.to_string_lossy().to_string());
+
+        let session = ThreeWaySession::from_files(
+            &left_expanded,
+            &base_expanded,
+            &right_expanded,
+            out_buf,
+        )
+        .map_err(|e| e.to_string())?;
         let summary = session.summary();
         let initial_rows = session.get_viewport_rows(0, initial_row_count);
         let session_id = self.manager.allocate_id("merge");
@@ -709,21 +773,25 @@ impl AppBackend {
             .write()
             .insert(session_id.clone(), session);
 
+        let left_str = left_expanded.to_string_lossy().to_string();
+        let base_str = base_expanded.to_string_lossy().to_string();
+        let right_str = right_expanded.to_string_lossy().to_string();
+
         self.manager.record_recent(
-            format!("3-Way: {}", file_name_label(Path::new(left_path))),
+            format!("3-Way: {}", file_name_label(&left_expanded)),
             SessionKind::ThreeWayMerge,
-            left_path.to_string(),
-            right_path.to_string(),
-            Some(base_path.to_string()),
-            output_path.clone(),
+            left_str.clone(),
+            right_str.clone(),
+            Some(base_str.clone()),
+            out_str.clone(),
         );
 
         Ok(OpenThreeWayResponse {
             session_id,
-            left_path: left_path.to_string(),
-            base_path: base_path.to_string(),
-            right_path: right_path.to_string(),
-            output_path,
+            left_path: left_str,
+            base_path: base_str,
+            right_path: right_str,
+            output_path: out_str,
             summary,
             initial_rows,
         })
@@ -802,14 +870,16 @@ impl AppBackend {
         action: FolderSyncActionKind,
         options: FolderCompareOptions,
     ) -> Result<FolderDiffResult, String> {
+        let left_expanded = expand_path(left_dir);
+        let right_expanded = expand_path(right_dir);
         apply_folder_item_operation(
-            &PathBuf::from(left_dir),
-            &PathBuf::from(right_dir),
+            &left_expanded,
+            &right_expanded,
             relative_path,
             action,
         )
         .map_err(|e| e.to_string())?;
-        compare_folders(left_dir, right_dir, &options).map_err(|e| e.to_string())
+        compare_folders(&left_expanded, &right_expanded, &options).map_err(|e| e.to_string())
     }
 
     /// Unified JSON RPC dispatcher used by both Tauri IPC and the `fc` CLI UI Server.
@@ -968,7 +1038,9 @@ impl AppBackend {
             "write_text_file" => {
                 let path = args["path"].as_str().unwrap_or("");
                 let content = args["content"].as_str().unwrap_or("");
-                self.write_text_file(path, content)?;
+                let encoding = args["encoding"].as_str();
+                let line_ending = args["line_ending"].as_str();
+                self.write_text_file_with_options(path, content, encoding, line_ending)?;
                 Ok(json!({ "saved": true }))
             }
             "open_two_way_files" => {
@@ -1030,7 +1102,10 @@ impl AppBackend {
             "save_two_way_side" => {
                 let session_id = args["session_id"].as_str().unwrap_or("");
                 let is_left = args["is_left"].as_bool().unwrap_or(true);
-                let target_path = args["target_path"].as_str();
+                let target_path = args["target_path"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 let summary = self.save_two_way_side(session_id, is_left, target_path)?;
                 Ok(json!(summary))
             }
@@ -1089,7 +1164,10 @@ impl AppBackend {
             }
             "save_three_way_merged" => {
                 let session_id = args["session_id"].as_str().unwrap_or("");
-                let target_path = args["target_path"].as_str();
+                let target_path = args["target_path"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 self.save_three_way_merged(session_id, target_path)?;
                 self.exit_code.store(exit_codes::SAME, Ordering::SeqCst);
                 Ok(json!({ "saved": true }))

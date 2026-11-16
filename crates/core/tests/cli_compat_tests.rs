@@ -1,7 +1,7 @@
-use freecompare_core::cli_args::{
-    exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode,
+use freecompare_core::{
+    cli_args::{exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode},
+    expand_path,
 };
-use std::path::PathBuf;
 
 #[test]
 fn test_cli_optional_and_required_positional_paths() {
@@ -13,7 +13,7 @@ fn test_cli_optional_and_required_positional_paths() {
     // 1 path -> left pre-populated, right optional
     let inv1 = CliInvocation::parse(["left_only.rs"]).unwrap();
     assert_eq!(inv1.paths.len(), 1);
-    assert_eq!(inv1.left_path().unwrap().to_str(), Some("left_only.rs"));
+    assert_eq!(inv1.left_path(), Some(expand_path("left_only.rs").as_path()));
     assert!(inv1.right_path().is_none());
 
     // 2 paths -> left and right
@@ -22,19 +22,33 @@ fn test_cli_optional_and_required_positional_paths() {
 
     // 3 paths -> BC convention: [0]=Left, [1]=Right, [2]=Center/Base, output defaults to [2]
     let inv3 = CliInvocation::parse(["local.rs", "remote.rs", "base.rs"]).unwrap();
-    assert_eq!(inv3.left_path().unwrap().to_str(), Some("local.rs"));
-    assert_eq!(inv3.right_path().unwrap().to_str(), Some("remote.rs"));
-    assert_eq!(inv3.center_base_path().unwrap().to_str(), Some("base.rs"));
+    assert_eq!(inv3.left_path(), Some(expand_path("local.rs").as_path()));
+    assert_eq!(inv3.right_path(), Some(expand_path("remote.rs").as_path()));
+    assert_eq!(inv3.center_base_path(), Some(expand_path("base.rs").as_path()));
     assert_eq!(
         inv3.resolved_merge_output_path(),
-        Some(PathBuf::from("base.rs"))
+        Some(expand_path("base.rs"))
     );
 
     // 4 paths -> Git mergetool convention: [0]=Left, [1]=Right, [2]=Center/Base, [3]=Merged Output
     let inv4 = CliInvocation::parse(["local.rs", "remote.rs", "base.rs", "merged.rs"]).unwrap();
     assert_eq!(
         inv4.resolved_merge_output_path(),
-        Some(PathBuf::from("merged.rs"))
+        Some(expand_path("merged.rs"))
+    );
+
+    // `~` expansion for positional paths and `-mergeoutput`
+    let inv_tilde = CliInvocation::parse([
+        "~/left.rs",
+        "~/right.rs",
+        "~/base.rs",
+        "-mergeoutput=~/merged_out.rs",
+    ])
+    .unwrap();
+    assert_eq!(inv_tilde.left_path(), Some(expand_path("~/left.rs").as_path()));
+    assert_eq!(
+        inv_tilde.resolved_merge_output_path(),
+        Some(expand_path("~/merged_out.rs"))
     );
 }
 
@@ -69,7 +83,7 @@ fn test_cli_bc_flags_dash_slash_colon_equals_and_optional_values() {
     assert_eq!(inv.titles[3].as_deref(), Some("MERGED"));
     assert_eq!(
         inv.resolved_merge_output_path(),
-        Some(PathBuf::from("out/final.rs"))
+        Some(expand_path("out/final.rs"))
     );
     assert_eq!(inv.paths.len(), 3);
 }

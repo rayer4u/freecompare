@@ -1,4 +1,4 @@
-import { Component, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import {
   callRustRpc,
   createBlankFolderDiff,
@@ -7,6 +7,7 @@ import {
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
 import { t } from "../i18n";
+import { mergeFolderExcludeGlobs } from "../utils/preferences";
 import {
   FolderDiffResult,
   FolderEntryDto,
@@ -20,6 +21,8 @@ interface FolderDiffViewProps {
   initialLeftDir?: string;
   initialRightDir?: string;
   expandAll?: boolean;
+  filters?: string[];
+  userPrefs?: UserPreferencesDto | null;
   onCloseOrExit?: () => void;
   onOpenFileDiff: (
     leftFullPath: string,
@@ -52,6 +55,12 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [selectedRightRelPath, setSelectedRightRelPath] = createSignal<string | null>(null);
   const [compareMode, setCompareMode] = createSignal<"hash" | "fast">("hash");
   const [isRecursiveScan, setIsRecursiveScan] = createSignal(Boolean(props.expandAll));
+  const [prefsExcludeGlobs, setPrefsExcludeGlobs] = createSignal<string[] | null>(null);
+  const effectiveExcludeGlobs = () =>
+    mergeFolderExcludeGlobs(
+      props.userPrefs?.folder_exclude_globs ?? prefsExcludeGlobs(),
+      props.filters
+    );
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
     y: number;
@@ -82,7 +91,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         options: {
           mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
           ignore_case_names: false,
-          exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
+          exclude_globs: effectiveExcludeGlobs(),
           recursive,
         },
       });
@@ -150,7 +159,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         options: {
           mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
           ignore_case_names: false,
-          exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
+          exclude_globs: effectiveExcludeGlobs(),
           recursive,
         },
       });
@@ -351,17 +360,47 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const handleFolderKeyDown = (e: KeyboardEvent) => {
-    if (props.isActive === false) return;
+    if (props.isActive === false || e.defaultPrevented) return;
     const activeEl = document.activeElement;
-    if (
-      activeEl instanceof HTMLInputElement ||
-      activeEl instanceof HTMLTextAreaElement ||
-      browserSide()
-    ) {
+    const isInputFocused =
+      activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
+
+    if (e.key === "Escape") {
+      if (contextMenu()) {
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu(null);
+        return;
+      }
+      if (browserSide()) {
+        e.preventDefault();
+        e.stopPropagation();
+        setBrowserSide(null);
+        return;
+      }
+      if (document.querySelector(".modal-backdrop")) {
+        return;
+      }
+      if (isInputFocused) {
+        e.preventDefault();
+        e.stopPropagation();
+        (activeEl as HTMLElement).blur();
+        return;
+      }
+      if (e.shiftKey) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      props.onCloseOrExit?.();
       return;
     }
 
-    if (e.key === "Escape" || e.key === "q" || (e.ctrlKey && e.key.toLowerCase() === "w")) {
+    if (isInputFocused || browserSide() || document.querySelector(".modal-backdrop")) {
+      return;
+    }
+
+    if (e.key === "q" || (e.ctrlKey && e.key.toLowerCase() === "w")) {
       e.preventDefault();
       props.onCloseOrExit?.();
       return;
@@ -442,31 +481,58 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
   const dismissMenu = () => setContextMenu(null);
 
-  onMount(async () => {
-    window.addEventListener("keydown", handleFolderKeyDown);
-    window.addEventListener("click", dismissMenu);
-    const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
-    if (prefs) {
-      if (prefs.folder_compare_mode === "hash" || prefs.folder_compare_mode === "fast") {
-        setCompareMode(prefs.folder_compare_mode);
-      }
-      if (
-        prefs.folder_filter_status === "all" ||
+  const applyFolderPreferences = (prefs: UserPreferencesDto, allowRescan: boolean) => {
+    const prevGlobsKey = effectiveExcludeGlobs().join("\0");
+    const prevMode = compareMode();
+
+    if (prefs.folder_compare_mode === "hash" || prefs.folder_compare_mode === "fast") {
+      setCompareMode(prefs.folder_compare_mode);
+    }
+    if (
+      !allowRescan &&
+      (prefs.folder_filter_status === "all" ||
         prefs.folder_filter_status === "diffs" ||
         prefs.folder_filter_status === "orphans" ||
-        prefs.folder_filter_status === "equals"
-      ) {
-        setFilterStatus(prefs.folder_filter_status);
-      }
-      setRecentFolders(prefs.recent_folder_paths ?? []);
+        prefs.folder_filter_status === "equals")
+    ) {
+      setFilterStatus(prefs.folder_filter_status);
     }
+    setPrefsExcludeGlobs(prefs.folder_exclude_globs ?? []);
+    setRecentFolders(prefs.recent_folder_paths ?? []);
+
+    if (allowRescan && leftInput().trim() && rightInput().trim()) {
+      const nextGlobsKey = mergeFolderExcludeGlobs(
+        prefs.folder_exclude_globs ?? [],
+        props.filters
+      ).join("\0");
+      if (nextGlobsKey !== prevGlobsKey || compareMode() !== prevMode) {
+        scanRealFolders(leftInput(), rightInput(), isRecursiveScan());
+      }
+    }
+  };
+
+  let folderMountedOnce = false;
+  createEffect(() => {
+    const prefs = props.userPrefs;
+    if (!prefs) return;
+    untrack(() => applyFolderPreferences(prefs, folderMountedOnce));
+  });
+
+  onMount(async () => {
+    document.addEventListener("keydown", handleFolderKeyDown);
+    window.addEventListener("click", dismissMenu);
+    const prefs = props.userPrefs ?? (await callRustRpc<UserPreferencesDto>("get_user_preferences"));
+    if (prefs) {
+      applyFolderPreferences(prefs, false);
+    }
+    folderMountedOnce = true;
     if (props.initialLeftDir && props.initialRightDir) {
       scanRealFolders(props.initialLeftDir, props.initialRightDir);
     }
   });
 
   onCleanup(() => {
-    window.removeEventListener("keydown", handleFolderKeyDown);
+    document.removeEventListener("keydown", handleFolderKeyDown);
     window.removeEventListener("click", dismissMenu);
   });
 
@@ -563,24 +629,34 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
     const action =
       direction === "left_to_right" ? "copy_left_to_right" : "copy_right_to_left";
-    const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
-      left_dir: folderData().left_root,
-      right_dir: folderData().right_root,
-      relative_path: rel,
-      action,
-      options: {
-        mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
-        ignore_case_names: false,
-        exclude_globs: [".git", "node_modules", "target", ".DS_Store"],
-      },
-    }).catch(() => null);
+    try {
+      const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
+        left_dir: folderData().left_root,
+        right_dir: folderData().right_root,
+        relative_path: rel,
+        action,
+        options: {
+          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+          ignore_case_names: false,
+          exclude_globs: effectiveExcludeGlobs(),
+          recursive: isRecursiveScan(),
+        },
+      });
 
-    if (remoteRes) {
-      setFolderData(remoteRes);
+      if (remoteRes) {
+        setFolderData(remoteRes);
+        notify(
+          direction === "left_to_right"
+            ? t("folder_diff.copied_to_right_done", { path: rel })
+            : t("folder_diff.copied_to_left_done", { path: rel })
+        );
+        return;
+      }
+    } catch (err) {
       notify(
-        direction === "left_to_right"
-          ? t("folder_diff.copied_to_right_done", { path: rel })
-          : t("folder_diff.copied_to_left_done", { path: rel })
+        t("folder_diff.sync_failed", {
+          err: err instanceof Error ? err.message : String(err),
+        })
       );
       return;
     }
@@ -613,6 +689,60 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         stats: recomputeFolderStats(updated),
       };
     });
+  };
+
+  const handleDeleteItem = async (
+    side: "left" | "right",
+    entry: FolderEntryDto
+  ) => {
+    if (side === "left" && entry.status === "right_only") return;
+    if (side === "right" && entry.status === "left_only") return;
+
+    const confirmMsg =
+      side === "left"
+        ? t("folder_diff.delete_left_confirm", { path: entry.relative_path })
+        : t("folder_diff.delete_right_confirm", { path: entry.relative_path });
+    if (!window.confirm(confirmMsg)) return;
+
+    const action = side === "left" ? "delete_left" : "delete_right";
+    try {
+      const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
+        left_dir: folderData().left_root,
+        right_dir: folderData().right_root,
+        relative_path: entry.relative_path,
+        action,
+        options: {
+          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+          ignore_case_names: false,
+          exclude_globs: effectiveExcludeGlobs(),
+          recursive: isRecursiveScan(),
+        },
+      });
+      if (remoteRes) {
+        setFolderData(remoteRes);
+        const stillExists = new Set(remoteRes.entries.map((e) => e.relative_path));
+        if (selectedRelPath() && !stillExists.has(selectedRelPath()!)) {
+          setSelectedRelPath(null);
+        }
+        if (selectedLeftRelPath() && !stillExists.has(selectedLeftRelPath()!)) {
+          setSelectedLeftRelPath(null);
+        }
+        if (selectedRightRelPath() && !stillExists.has(selectedRightRelPath()!)) {
+          setSelectedRightRelPath(null);
+        }
+        notify(
+          side === "left"
+            ? t("folder_diff.deleted_left_done", { path: entry.relative_path })
+            : t("folder_diff.deleted_right_done", { path: entry.relative_path })
+        );
+      }
+    } catch (err) {
+      notify(
+        t("folder_diff.sync_failed", {
+          err: err instanceof Error ? err.message : String(err),
+        })
+      );
+    }
   };
 
   return (
@@ -1049,26 +1179,54 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               </div>
               <div class="ctx-divider" />
             </Show>
-            <div
-              class="ctx-item"
-              onClick={() => {
-                const rel = menu().entry.relative_path;
-                setContextMenu(null);
-                handleCopyItem("left_to_right", rel);
-              }}
-            >
-              <span>{t("folder_diff.copy_to_right_item")}</span>
-            </div>
-            <div
-              class="ctx-item"
-              onClick={() => {
-                const rel = menu().entry.relative_path;
-                setContextMenu(null);
-                handleCopyItem("right_to_left", rel);
-              }}
-            >
-              <span>{t("folder_diff.copy_to_left_item")}</span>
-            </div>
+            <Show when={menu().entry.status !== "right_only"}>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  const rel = menu().entry.relative_path;
+                  setContextMenu(null);
+                  handleCopyItem("left_to_right", rel);
+                }}
+              >
+                <span>{t("folder_diff.copy_to_right_item")}</span>
+              </div>
+            </Show>
+            <Show when={menu().entry.status !== "left_only"}>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  const rel = menu().entry.relative_path;
+                  setContextMenu(null);
+                  handleCopyItem("right_to_left", rel);
+                }}
+              >
+                <span>{t("folder_diff.copy_to_left_item")}</span>
+              </div>
+            </Show>
+            <Show when={menu().entry.status !== "right_only"}>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  const entry = menu().entry;
+                  setContextMenu(null);
+                  handleDeleteItem("left", entry);
+                }}
+              >
+                <span>{t("folder_diff.delete_left_item")}</span>
+              </div>
+            </Show>
+            <Show when={menu().entry.status !== "left_only"}>
+              <div
+                class="ctx-item"
+                onClick={() => {
+                  const entry = menu().entry;
+                  setContextMenu(null);
+                  handleDeleteItem("right", entry);
+                }}
+              >
+                <span>{t("folder_diff.delete_right_item")}</span>
+              </div>
+            </Show>
             <div class="ctx-divider" />
             <div
               class="ctx-item"
@@ -1259,7 +1417,7 @@ const FolderRow: Component<{
       </div>
 
       <div class="folder-col-center">
-        <Show when={!props.entry.is_dir && props.entry.status !== "equal"}>
+        <Show when={props.entry.status !== "equal" && props.entry.status !== "right_only"}>
           <button
             class="gutter-copy-btn"
             title={t("folder_diff.copy_right_tip")}
@@ -1282,7 +1440,7 @@ const FolderRow: Component<{
             ? "→"
             : "~"}
         </span>
-        <Show when={!props.entry.is_dir && props.entry.status !== "equal"}>
+        <Show when={props.entry.status !== "equal" && props.entry.status !== "left_only"}>
           <button
             class="gutter-copy-btn"
             title={t("folder_diff.copy_left_tip")}

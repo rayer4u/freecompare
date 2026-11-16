@@ -9,9 +9,11 @@ import { Merge3WayView } from "./views/Merge3WayView";
 import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { currentLocale, setLocale, toggleLocale, t } from "./i18n";
+import { shouldBlockGlobalEscape } from "./utils/preferences";
 
 export const App: Component = () => {
   const [theme, setTheme] = createSignal<"dark" | "light">("dark");
+  const [userPrefs, setUserPrefs] = createSignal<UserPreferencesDto | null>(null);
   const [showSettings, setShowSettings] = createSignal(false);
   const [showAbout, setShowAbout] = createSignal(false);
   // Start cleanly on the Home tab without any pre-populated fake demo tabs!
@@ -210,6 +212,9 @@ export const App: Component = () => {
     });
 
     const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
+    if (prefs) {
+      setUserPrefs(prefs);
+    }
     if (prefs?.theme === "light" || prefs?.theme === "dark") {
       setTheme(prefs.theme);
     }
@@ -303,6 +308,15 @@ export const App: Component = () => {
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
 
       if (e.key === "Escape") {
+        if (
+          shouldBlockGlobalEscape({
+            showSettings: showSettings(),
+            showAbout: showAbout(),
+            doc: document,
+          })
+        ) {
+          return;
+        }
         const tab = activeTab();
         const inReview = isReviewActive();
         if (e.shiftKey) {
@@ -523,6 +537,7 @@ export const App: Component = () => {
             onClick={() => {
               const next = theme() === "dark" ? "light" : "dark";
               setTheme(next);
+              setUserPrefs((prev) => (prev ? { ...prev, theme: next } : prev));
               callRustRpc("update_user_preferences", { theme: next }).catch(() => {});
             }}
             title={theme() === "dark" ? t("header.theme_dark") : t("header.theme_light")}
@@ -574,6 +589,7 @@ export const App: Component = () => {
                   rightReadonly={tab.readonly?.[1]}
                   siblingFiles={tab.siblingFiles}
                   reviewMode={tab.reviewMode}
+                  userPrefs={userPrefs()}
                   onCloseOrExit={handleCloseOrExitActiveSession}
                   onUpdateTabTitle={(newTitle) => {
                     const full = newTitle.startsWith("⇄ ") ? newTitle : "⇄ " + newTitle;
@@ -587,6 +603,8 @@ export const App: Component = () => {
                   initialLeftDir={tab.leftPath}
                   initialRightDir={tab.rightPath}
                   expandAll={tab.expandAll}
+                  filters={tab.filters}
+                  userPrefs={userPrefs()}
                   onCloseOrExit={handleCloseOrExitActiveSession}
                   onOpenFileDiff={(leftFullPath, rightFullPath, relPath, siblingFiles) =>
                     launchSession(
@@ -603,7 +621,9 @@ export const App: Component = () => {
                       "folder",
                       relPath.split("/").pop() ?? relPath,
                       leftFullPath,
-                      rightFullPath
+                      rightFullPath,
+                      undefined,
+                      { filters: tab.filters }
                     )
                   }
                   onUpdateTabTitle={(newTitle) => {
@@ -621,6 +641,8 @@ export const App: Component = () => {
                   initialRightPath={tab.rightPath}
                   initialOutputPath={tab.outputPath}
                   titles={tab.titles}
+                  userPrefs={userPrefs()}
+                  collectWindowGeometry={collectWindowGeometry}
                   onCloseOrExit={handleCloseOrExitActiveSession}
                   onUpdateTabTitle={(newTitle) => {
                     const full = newTitle.startsWith("⑃ ") ? newTitle : "⑃ " + newTitle;
@@ -637,6 +659,7 @@ export const App: Component = () => {
         <SettingsModal
           onClose={() => setShowSettings(false)}
           onPreferencesUpdated={(p) => {
+            setUserPrefs(p);
             if (p.theme === "dark" || p.theme === "light") {
               setTheme(p.theme);
             }

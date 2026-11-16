@@ -24,6 +24,12 @@ import {
   type DiffComputationResult,
 } from "./diff_core.ts";
 import { computeDiffAsync } from "./diff_worker_client.ts";
+import {
+  findTextMatches,
+  findVirtualRowByLineNumber,
+  type SearchMatch,
+  type SearchScope,
+} from "./utils/text_search.ts";
 
 export { computeInlineSegments };
 
@@ -70,6 +76,7 @@ export interface ReadTextFileResult {
   path: string;
   line_count: number;
   encoding: string;
+  line_ending?: string;
 }
 
 export interface AppInfoDto {
@@ -112,6 +119,8 @@ export interface UserPreferencesDto {
   recent_folder_paths: string[];
 }
 
+class RpcBackendError extends Error {}
+
 /**
  * Calls the Rust `AppBackend` via Tauri v2 IPC (`rpc_invoke`) or via the local
  * HTTP RPC server started by `fc` / `bcompare <left> <right>`.
@@ -133,7 +142,7 @@ export async function callRustRpc<T>(
     if (!resp.ok) {
       const errJson = await resp.json().catch(() => null);
       if (errJson?.error) {
-        throw new Error(errJson.error);
+        throw new RpcBackendError(errJson.error);
       }
       return null;
     }
@@ -141,9 +150,15 @@ export async function callRustRpc<T>(
     if (json && json.ok) {
       return json.data as T;
     }
+    if (json && json.ok === false && json.error) {
+      throw new RpcBackendError(json.error);
+    }
     return null;
   } catch (err) {
-    if (err instanceof Error && err.message.startsWith("无法")) {
+    if (
+      err instanceof RpcBackendError ||
+      (err instanceof Error && err.message.startsWith("无法"))
+    ) {
       throw err;
     }
     return null;
@@ -190,6 +205,13 @@ function tokenizeLine(line: string): SyntaxToken[] {
 
 export type { ViewRowFilter };
 
+export interface TwoWaySessionFormatMeta {
+  leftEncoding?: string;
+  rightEncoding?: string;
+  leftLineEnding?: string;
+  rightLineEnding?: string;
+}
+
 interface LocalTwoWayState {
   leftLines: string[];
   rightLines: string[];
@@ -199,6 +221,10 @@ interface LocalTwoWayState {
   rightRedo: string[][];
   leftDirty: boolean;
   rightDirty: boolean;
+  leftEncoding: string;
+  rightEncoding: string;
+  leftLineEnding: string;
+  rightLineEnding: string;
   options: DiffOptions;
   rowFilter: ViewRowFilter;
   allRows: ViewportRowDto[];
@@ -231,10 +257,10 @@ function summarizeLocalTwoWay(state: LocalTwoWayState): TwoWayDiffResult {
     right_line_count: state.rightLines.length,
     left_dirty: state.leftDirty,
     right_dirty: state.rightDirty,
-    left_encoding: "UTF-8",
-    right_encoding: "UTF-8",
-    left_line_ending: "LF",
-    right_line_ending: "LF",
+    left_encoding: state.leftEncoding,
+    right_encoding: state.rightEncoding,
+    left_line_ending: state.leftLineEnding,
+    right_line_ending: state.rightLineEnding,
     hunks: state.hunks,
     stats: state.stats,
   };
@@ -250,10 +276,11 @@ export class CompareBackendClient {
       ignore_case: false,
       show_only_diffs: false,
       context_lines: 3,
-    }
+    },
+    meta?: TwoWaySessionFormatMeta
   ): TwoWayDiffResult {
     const splitLines = (txt: string) =>
-      txt.length === 0 ? [] : txt.replace(/\r\n/g, "\n").split("\n");
+      txt.length === 0 ? [] : txt.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     const state: LocalTwoWayState = {
       leftLines: splitLines(leftContent),
       rightLines: splitLines(rightContent),
@@ -263,6 +290,10 @@ export class CompareBackendClient {
       rightRedo: [],
       leftDirty: false,
       rightDirty: false,
+      leftEncoding: meta?.leftEncoding || "UTF-8",
+      rightEncoding: meta?.rightEncoding || "UTF-8",
+      leftLineEnding: meta?.leftLineEnding || "LF",
+      rightLineEnding: meta?.rightLineEnding || "LF",
       options,
       rowFilter: "all",
       allRows: [],
@@ -290,7 +321,8 @@ export class CompareBackendClient {
       ignore_case: false,
       show_only_diffs: false,
       context_lines: 3,
-    }
+    },
+    meta?: TwoWaySessionFormatMeta
   ): Promise<TwoWayDiffResult> {
     const computed = await computeDiffAsync(
       sessionId,
@@ -308,6 +340,10 @@ export class CompareBackendClient {
       rightRedo: [],
       leftDirty: false,
       rightDirty: false,
+      leftEncoding: meta?.leftEncoding || "UTF-8",
+      rightEncoding: meta?.rightEncoding || "UTF-8",
+      leftLineEnding: meta?.leftLineEnding || "LF",
+      rightLineEnding: meta?.rightLineEnding || "LF",
       options,
       rowFilter: "all",
       allRows: computed.allRows,
@@ -367,6 +403,32 @@ export class CompareBackendClient {
       total_rows: total,
       rows,
     };
+  }
+
+  static searchVisibleRows(
+    sessionId: string,
+    query: string,
+    scope: SearchScope = "both",
+    caseSensitive = false
+  ): SearchMatch[] {
+    const state = localTwoWayStore.get(sessionId);
+    if (!state) return [];
+    return findTextMatches(state.visibleRows, query, scope, caseSensitive);
+  }
+
+  static findRowByLineNumber(
+    sessionId: string,
+    lineNo1Based: number,
+    side: "left" | "right"
+  ): { row: ViewportRowDto; exact: boolean; actualLineNo: number | null } | null {
+    const state = localTwoWayStore.get(sessionId);
+    if (!state) return null;
+    const hit = findVirtualRowByLineNumber(state.visibleRows, lineNo1Based, side);
+    if (!hit) return null;
+    const slice = CompareBackendClient.getViewportSlice(sessionId, hit.virtualIdx, 1);
+    const row = slice.rows[0];
+    if (!row) return null;
+    return { row, exact: hit.exact, actualLineNo: hit.actualLineNo };
   }
 
   static updateOptions(
@@ -487,22 +549,29 @@ export class CompareBackendClient {
   static replaceSideText(
     sessionId: string,
     isLeft: boolean,
-    newFullText: string
+    newFullText: string,
+    format?: { encoding?: string; lineEnding?: string }
   ): TwoWayDiffResult {
     const state = localTwoWayStore.get(sessionId);
     if (!state) throw new Error("Session not found");
     const lines =
-      newFullText.length === 0 ? [] : newFullText.replace(/\r\n/g, "\n").split("\n");
+      newFullText.length === 0
+        ? []
+        : newFullText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     if (isLeft) {
       state.leftUndo.push([...state.leftLines]);
       state.leftRedo = [];
       state.leftLines = lines;
       state.leftDirty = true;
+      if (format?.encoding) state.leftEncoding = format.encoding;
+      if (format?.lineEnding) state.leftLineEnding = format.lineEnding;
     } else {
       state.rightUndo.push([...state.rightLines]);
       state.rightRedo = [];
       state.rightLines = lines;
       state.rightDirty = true;
+      if (format?.encoding) state.rightEncoding = format.encoding;
+      if (format?.lineEnding) state.rightLineEnding = format.lineEnding;
     }
     recomputeLocalTwoWay(state);
     return summarizeLocalTwoWay(state);
@@ -517,6 +586,12 @@ export class CompareBackendClient {
     const tmpDirty = state.leftDirty;
     state.leftDirty = state.rightDirty;
     state.rightDirty = tmpDirty;
+    const tmpEnc = state.leftEncoding;
+    state.leftEncoding = state.rightEncoding;
+    state.rightEncoding = tmpEnc;
+    const tmpLe = state.leftLineEnding;
+    state.leftLineEnding = state.rightLineEnding;
+    state.rightLineEnding = tmpLe;
     const tmpUndo = state.leftUndo;
     state.leftUndo = state.rightUndo;
     state.rightUndo = tmpUndo;
@@ -544,48 +619,49 @@ export class CompareBackendClient {
     const trimmedL = leftPath.trim();
     const trimmedR = rightPath.trim();
 
-    const [leftRes, rightRes] = await Promise.all([
-      trimmedL
-        ? callRustRpc<ReadTextFileResult>("read_text_file", { path: trimmedL }).catch(() => ({
-            content: "",
-            path: trimmedL,
-            line_count: 0,
-            encoding: "UTF-8",
-          }))
-        : Promise.resolve({
-            content: "",
-            path: "",
-            line_count: 0,
-            encoding: "UTF-8",
-          }),
-      trimmedR
-        ? callRustRpc<ReadTextFileResult>("read_text_file", { path: trimmedR }).catch(() => ({
-            content: "",
-            path: trimmedR,
-            line_count: 0,
-            encoding: "UTF-8",
-          }))
-        : Promise.resolve({
-            content: "",
-            path: "",
-            line_count: 0,
-            encoding: "UTF-8",
-          }),
-    ]);
+    const readSide = async (sidePath: string): Promise<ReadTextFileResult> => {
+      if (!sidePath) {
+        return {
+          content: "",
+          path: "",
+          line_count: 0,
+          encoding: "UTF-8",
+          line_ending: "LF",
+        };
+      }
+      const res = await callRustRpc<ReadTextFileResult>("read_text_file", {
+        path: sidePath,
+      });
+      if (!res) {
+        throw new Error(`无法读取文件: ${sidePath}`);
+      }
+      return res;
+    };
 
-    if (!leftRes && !rightRes) return null;
+    const [leftRes, rightRes] = await Promise.all([
+      readSide(trimmedL),
+      readSide(trimmedR),
+    ]);
 
     return CompareBackendClient.createTwoWaySessionAsync(
       sessionId,
-      leftRes?.content ?? "",
-      rightRes?.content ?? "",
-      options
+      leftRes.content ?? "",
+      rightRes.content ?? "",
+      options,
+      {
+        leftEncoding: leftRes.encoding || "UTF-8",
+        rightEncoding: rightRes.encoding || "UTF-8",
+        leftLineEnding: leftRes.line_ending || "LF",
+        rightLineEnding: rightRes.line_ending || "LF",
+      }
     );
   }
 }
 
 // 3-Way Merge Engine (starts completely blank unless files or text are provided)
 interface LocalThreeWayState {
+  backendSessionId: string | null;
+  pendingSyncs: Set<Promise<unknown>>;
   rows: ThreeWayRow[];
   hunks: ThreeWayHunk[];
   baseLines: string[];
@@ -599,6 +675,8 @@ export function createBlankThreeWaySession(
   sessionId: string
 ): { summary: ThreeWayDiffResult; rows: ThreeWayRow[] } {
   const state: LocalThreeWayState = {
+    backendSessionId: null,
+    pendingSyncs: new Set(),
     rows: [],
     hunks: [],
     baseLines: [],
@@ -648,6 +726,8 @@ export async function loadRealThreeWayFiles(
   }
 
   localThreeWayStore.set(sessionId, {
+    backendSessionId: res.session_id,
+    pendingSyncs: new Set(),
     rows: res.initial_rows,
     hunks: res.summary.hunks,
     baseLines,
@@ -672,7 +752,40 @@ export function resolveThreeWayHunk(
   if (hunk) {
     hunk.resolution = resolution;
   }
+  if (state.backendSessionId) {
+    const syncPromise = callRustRpc("resolve_three_way_conflict", {
+      session_id: state.backendSessionId,
+      hunk_id: hunkId,
+      resolution,
+    })
+      .catch(() => null)
+      .finally(() => {
+        state.pendingSyncs.delete(syncPromise);
+      });
+    state.pendingSyncs.add(syncPromise);
+  }
   return buildThreeWaySummary(state);
+}
+
+export async function saveThreeWayMerged(
+  sessionId: string,
+  targetPath?: string
+): Promise<{ saved: boolean; usedBackend: boolean }> {
+  const state = localThreeWayStore.get(sessionId);
+  if (state && state.pendingSyncs.size > 0) {
+    await Promise.allSettled(Array.from(state.pendingSyncs));
+  }
+  if (state?.backendSessionId) {
+    const res = await callRustRpc<{ saved: boolean }>("save_three_way_merged", {
+      session_id: state.backendSessionId,
+      target_path: targetPath?.trim() ? targetPath.trim() : null,
+    });
+    return {
+      saved: Boolean(res?.saved),
+      usedBackend: true,
+    };
+  }
+  return { saved: false, usedBackend: false };
 }
 
 function buildThreeWaySummary(state: LocalThreeWayState): ThreeWayDiffResult {

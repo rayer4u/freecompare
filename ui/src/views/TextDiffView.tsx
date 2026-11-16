@@ -1,4 +1,4 @@
-import { Component, createMemo, createSignal, onCleanup, onMount, Show, For } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, onCleanup, onMount, Show, For, untrack } from "solid-js";
 import {
   callRustRpc,
   CompareBackendClient,
@@ -10,6 +10,12 @@ import {
 import { FileBrowserModal } from "../components/FileBrowserModal";
 import { VirtualDiffViewport } from "../engine/VirtualDiffViewport";
 import { t } from "../i18n";
+import { computeNextHunkIndex } from "../utils/preferences";
+import {
+  findFirstMatchFromRow,
+  findLastMatchBeforeRow,
+  type SearchScope,
+} from "../utils/text_search";
 import {
   DiffOptions,
   MergeDirection,
@@ -31,6 +37,7 @@ interface TextDiffViewProps {
   rightReadonly?: boolean;
   siblingFiles?: SiblingDiffFileItem[];
   reviewMode?: boolean;
+  userPrefs?: UserPreferencesDto | null;
   onCloseOrExit?: () => void;
   onUpdateTabTitle?: (newTitle: string) => void;
 }
@@ -56,8 +63,11 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   );
   const [showLineInspector, setShowLineInspector] = createSignal<boolean>(true);
   const [editorFontSize, setEditorFontSize] = createSignal<number>(13);
+  const [tabWidth, setTabWidth] = createSignal<number>(4);
   const [showWhitespaceGlyphs, setShowWhitespaceGlyphs] = createSignal<boolean>(false);
+  const [syntaxHighlighting, setSyntaxHighlighting] = createSignal<boolean>(true);
   const [autoJumpFirstDiff, setAutoJumpFirstDiff] = createSignal<boolean>(true);
+  const [wrapAroundNavigation, setWrapAroundNavigation] = createSignal<boolean>(true);
   const [confirmExitDirty, setConfirmExitDirty] = createSignal<boolean>(true);
   const [recentLeftPaths, setRecentLeftPaths] = createSignal<string[]>([]);
   const [recentRightPaths, setRecentRightPaths] = createSignal<string[]>([]);
@@ -69,6 +79,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   } | null>(null);
   const [rulesMenuPos, setRulesMenuPos] = createSignal<{ top: number; left: number } | null>(null);
   let lastReportedTitle = "";
+  let lastLoadedLeftPath = (props.initialLeftPath ?? "").trim();
+  let lastLoadedRightPath = (props.initialRightPath ?? "").trim();
 
   const dismissMenus = (e?: MouseEvent) => {
     const target = e?.target as HTMLElement | null;
@@ -182,8 +194,129 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const [activeHunkIdx, setActiveHunkIdx] = createSignal<number>(0);
   const [selectedRow, setSelectedRow] = createSignal<ViewportRowDto | null>(null);
   const [scrollTriggerRow, setScrollTriggerRow] = createSignal<number | null>(null);
+  const [scrollTriggerTick, setScrollTriggerTick] = createSignal(0);
   const [isDiffing, setIsDiffing] = createSignal(false);
   const [toastMsg, setToastMsg] = createSignal<string | null>(null);
+
+  const [showSearchBar, setShowSearchBar] = createSignal(false);
+  const [searchQuery, setSearchQuery] = createSignal("");
+  const [searchScope, setSearchScope] = createSignal<SearchScope>("both");
+  const [searchCaseSensitive, setSearchCaseSensitive] = createSignal(false);
+  const [activeMatchIdx, setActiveMatchIdx] = createSignal(0);
+  const [showGotoBar, setShowGotoBar] = createSignal(false);
+  const [gotoLineInput, setGotoLineInput] = createSignal("");
+  let searchInputRef: HTMLInputElement | undefined;
+  let gotoInputRef: HTMLInputElement | undefined;
+  let searchAnchorVirtualIdx = 0;
+  let searchAnchorDirty = false;
+
+  const triggerScrollToRow = (rowIdx: number) => {
+    setScrollTriggerRow(rowIdx);
+    setScrollTriggerTick((v) => v + 1);
+  };
+
+  const searchMatches = createMemo(() => {
+    versionTick();
+    return CompareBackendClient.searchVisibleRows(
+      props.sessionId,
+      searchQuery(),
+      searchScope(),
+      searchCaseSensitive()
+    );
+  });
+
+  const searchMatchSet = createMemo(() => {
+    if (!showSearchBar() || !searchQuery()) return new Set<number>();
+    return new Set(searchMatches().map((m) => m.virtualIdx));
+  });
+
+  const activeSearchRowIdx = createMemo(() => {
+    if (!showSearchBar() || !searchQuery()) return null;
+    const matches = searchMatches();
+    if (matches.length === 0) return null;
+    const idx = Math.max(0, Math.min(activeMatchIdx(), matches.length - 1));
+    return matches[idx]?.virtualIdx ?? null;
+  });
+
+  const openSearchBar = () => {
+    setShowGotoBar(false);
+    searchAnchorVirtualIdx = selectedRow()?.virtual_idx ?? 0;
+    searchAnchorDirty = true;
+    setShowSearchBar(true);
+    if (searchQuery()) {
+      jumpToSearchMatch(0, true);
+    }
+    setTimeout(() => {
+      searchInputRef?.focus();
+      searchInputRef?.select();
+    }, 0);
+  };
+
+  const openGotoBar = () => {
+    setShowSearchBar(false);
+    setShowGotoBar(true);
+    setTimeout(() => {
+      gotoInputRef?.focus();
+      gotoInputRef?.select();
+    }, 0);
+  };
+
+  const jumpToSearchMatch = (delta: number, resetToAnchor = false) => {
+    const matches = searchMatches();
+    if (matches.length === 0) {
+      setActiveMatchIdx(0);
+      return;
+    }
+    let nextIdx: number;
+    if (resetToAnchor || searchAnchorDirty) {
+      nextIdx =
+        delta < 0
+          ? findLastMatchBeforeRow(matches, searchAnchorVirtualIdx)
+          : findFirstMatchFromRow(matches, searchAnchorVirtualIdx);
+      searchAnchorDirty = false;
+    } else {
+      nextIdx = (((activeMatchIdx() + delta) % matches.length) + matches.length) % matches.length;
+    }
+    setActiveMatchIdx(nextIdx);
+    const match = matches[nextIdx];
+    triggerScrollToRow(match.virtualIdx);
+    setFocusedSide(match.side);
+    const slice = CompareBackendClient.getViewportSlice(
+      props.sessionId,
+      match.virtualIdx,
+      1
+    );
+    if (slice.rows[0]) {
+      setSelectedRow(slice.rows[0]);
+    }
+  };
+
+  const executeGotoLine = () => {
+    const parsed = Number.parseInt(gotoLineInput().trim(), 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      showToast(t("text_diff.goto_invalid"));
+      return;
+    }
+    const side = focusedSide();
+    const hit = CompareBackendClient.findRowByLineNumber(
+      props.sessionId,
+      parsed,
+      side
+    );
+    if (!hit) {
+      showToast(t("text_diff.goto_not_found"));
+      return;
+    }
+    triggerScrollToRow(hit.row.virtual_idx);
+    setSelectedRow(hit.row);
+    setShowGotoBar(false);
+    showToast(
+      t("text_diff.goto_jumped", {
+        side: side === "left" ? t("text_diff.side_left") : t("text_diff.side_right"),
+        line: hit.actualLineNo ?? parsed,
+      })
+    );
+  };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -205,10 +338,23 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const jumpToHunk = (delta: number) => {
     const hunks = summary().hunks;
     if (hunks.length === 0) return;
-    const nextIdx = (activeHunkIdx() + delta + hunks.length) % hunks.length;
+    const { nextIdx, boundary } = computeNextHunkIndex(
+      activeHunkIdx(),
+      hunks.length,
+      delta,
+      wrapAroundNavigation()
+    );
+    if (boundary === "first") {
+      showToast(t("text_diff.reached_first_diff"));
+      return;
+    }
+    if (boundary === "last") {
+      showToast(t("text_diff.reached_last_diff"));
+      return;
+    }
     setActiveHunkIdx(nextIdx);
     const targetHunk = hunks[nextIdx];
-    setScrollTriggerRow(targetHunk.virtual_start);
+    triggerScrollToRow(targetHunk.virtual_start);
     const slice = CompareBackendClient.getViewportSlice(
       props.sessionId,
       targetHunk.virtual_start,
@@ -313,6 +459,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     const lPath = leftPath();
     setLeftPath(rightPath());
     setRightPath(lPath);
+    const tmpLoaded = lastLoadedLeftPath;
+    lastLoadedLeftPath = lastLoadedRightPath;
+    lastLoadedRightPath = tmpLoaded;
     const nextSummary = CompareBackendClient.swapSides(props.sessionId);
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
@@ -370,11 +519,15 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   const handleSaveSide = async (isLeft: boolean) => {
     const path = (isLeft ? leftPath() : rightPath()).trim();
     const content = CompareBackendClient.getSideFullText(props.sessionId, isLeft);
+    const encoding = isLeft ? summary().left_encoding : summary().right_encoding;
+    const lineEnding = isLeft ? summary().left_line_ending : summary().right_line_ending;
     if (path && !path.startsWith("(")) {
       try {
         const res = await callRustRpc<{ saved: boolean }>("write_text_file", {
           path,
           content,
+          encoding,
+          line_ending: lineEnding,
         });
         if (res?.saved) {
           setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
@@ -418,13 +571,19 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         path: trimmed,
       });
       if (res) {
-        if (isLeft) setLeftPath(res.path);
-        else setRightPath(res.path);
+        if (isLeft) {
+          setLeftPath(res.path);
+          lastLoadedLeftPath = res.path.trim();
+        } else {
+          setRightPath(res.path);
+          lastLoadedRightPath = res.path.trim();
+        }
 
-        const nextSummary = CompareBackendClient.replaceSideText(
+        CompareBackendClient.replaceSideText(
           props.sessionId,
           isLeft,
-          res.content
+          res.content,
+          { encoding: res.encoding, lineEnding: res.line_ending }
         );
         setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
         setVersionTick((t) => t + 1);
@@ -459,12 +618,14 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         options()
       );
       if (loaded) {
+        lastLoadedLeftPath = l;
+        lastLoadedRightPath = r;
         setSummary(loaded);
         setVersionTick((t) => t + 1);
         if (autoJumpFirstDiff() && loaded.hunks.length > 0) {
           setActiveHunkIdx(0);
           const firstHunk = loaded.hunks[0];
-          setScrollTriggerRow(firstHunk.virtual_start);
+          triggerScrollToRow(firstHunk.virtual_start);
           const slice = CompareBackendClient.getViewportSlice(
             props.sessionId,
             firstHunk.virtual_start,
@@ -516,49 +677,97 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
-    if (props.isActive === false) return;
+    if (props.isActive === false || e.defaultPrevented) return;
     const activeEl = document.activeElement;
     const isInputFocused =
       activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
 
     // 1. `Esc` key: Beyond Compare's signature muscle-memory shortcut!
-    // If a modal or full-text selection is open, dismiss it first; otherwise exit / advance to next git difftool file!
+    // If a modal, menu, or full-text selection is open, dismiss it first; otherwise exit / advance to next git difftool file!
     if (e.key === "Escape") {
+      if (activeEl instanceof HTMLElement && activeEl.classList.contains("inline-line-editor")) {
+        return;
+      }
       if (contextMenu()) {
+        e.preventDefault();
+        e.stopPropagation();
         setContextMenu(null);
         return;
       }
       if (rulesMenuPos()) {
+        e.preventDefault();
+        e.stopPropagation();
         setRulesMenuPos(null);
         return;
       }
       if (browserTargetSide()) {
+        e.preventDefault();
+        e.stopPropagation();
         setBrowserTargetSide(null);
         return;
       }
       if (editingFullSide()) {
+        e.preventDefault();
+        e.stopPropagation();
         setEditingFullSide(null);
         return;
       }
+      if (document.querySelector(".modal-backdrop")) {
+        return;
+      }
+      if (showSearchBar()) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowSearchBar(false);
+        return;
+      }
+      if (showGotoBar()) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowGotoBar(false);
+        return;
+      }
       if (allSelectedSide()) {
+        e.preventDefault();
+        e.stopPropagation();
         setAllSelectedSide(null);
         return;
       }
       if (isInputFocused) {
+        e.preventDefault();
+        e.stopPropagation();
         (activeEl as HTMLElement).blur();
         return;
       }
-      e.preventDefault();
       if (e.shiftKey) {
-        handleRejectReview();
         return;
       }
+      e.preventDefault();
+      e.stopPropagation();
       if (isReviewMode()) {
         handleApproveReview();
         return;
       }
       tryCloseOrExit();
       return;
+    }
+
+    if (document.querySelector(".modal-backdrop")) return;
+
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const lower = e.key.toLowerCase();
+      if (lower === "f") {
+        e.preventDefault();
+        e.stopPropagation();
+        openSearchBar();
+        return;
+      }
+      if (lower === "g") {
+        e.preventDefault();
+        e.stopPropagation();
+        openGotoBar();
+        return;
+      }
     }
 
     if (isInputFocused) return;
@@ -782,40 +991,76 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     }
   };
 
-  onMount(async () => {
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("click", dismissMenus);
-    const prefs = await callRustRpc<UserPreferencesDto>("get_user_preferences");
-    if (prefs) {
-      const f =
-        prefs.text_row_filter === "diffs" || prefs.text_row_filter === "equals"
-          ? prefs.text_row_filter
-          : "all";
-      setRowFilter(f);
-      setOptions({
-        ignore_whitespace: Boolean(prefs.ignore_whitespace),
-        ignore_case: Boolean(prefs.ignore_case),
-        show_only_diffs: f === "diffs",
-        context_lines: 3,
-      });
-      if ((props.siblingFiles?.length ?? 0) > 1) {
-        setShowFilesSidebar(prefs.show_files_sidebar ?? true);
-      }
-      setShowLineInspector(prefs.show_line_inspector ?? true);
-      setEditorFontSize(prefs.editor_font_size || 13);
-      setShowWhitespaceGlyphs(Boolean(prefs.show_whitespace_glyphs));
-      setAutoJumpFirstDiff(prefs.auto_jump_first_diff ?? true);
-      setConfirmExitDirty(prefs.confirm_before_exit_dirty ?? true);
-      setRecentLeftPaths(prefs.recent_left_paths ?? []);
-      setRecentRightPaths(prefs.recent_right_paths ?? []);
+  const applyUserPreferences = (prefs: UserPreferencesDto, recomputeDiff: boolean) => {
+    const f =
+      prefs.text_row_filter === "diffs" || prefs.text_row_filter === "equals"
+        ? prefs.text_row_filter
+        : "all";
+    const nextIgnoreWs = Boolean(prefs.ignore_whitespace);
+    const nextIgnoreCase = Boolean(prefs.ignore_case);
+    const prevOpts = options();
+    const prevFilter = rowFilter();
+    const diffOptsChanged =
+      prevOpts.ignore_whitespace !== nextIgnoreWs ||
+      prevOpts.ignore_case !== nextIgnoreCase;
+    const filterChanged = prevFilter !== f;
+
+    setRowFilter(f);
+    const nextOpts: DiffOptions = {
+      ignore_whitespace: nextIgnoreWs,
+      ignore_case: nextIgnoreCase,
+      show_only_diffs: f === "diffs",
+      context_lines: 3,
+    };
+    setOptions(nextOpts);
+
+    if (recomputeDiff && (diffOptsChanged || filterChanged)) {
+      const nextSummary = CompareBackendClient.updateOptions(
+        props.sessionId,
+        nextOpts,
+        f
+      );
+      setSummary(nextSummary);
+      setVersionTick((v) => v + 1);
     }
+
+    if ((props.siblingFiles?.length ?? 0) > 1) {
+      setShowFilesSidebar(prefs.show_files_sidebar ?? true);
+    }
+    setShowLineInspector(prefs.show_line_inspector ?? true);
+    setEditorFontSize(prefs.editor_font_size || 13);
+    setTabWidth(prefs.tab_width || 4);
+    setShowWhitespaceGlyphs(Boolean(prefs.show_whitespace_glyphs));
+    setSyntaxHighlighting(prefs.syntax_highlighting ?? true);
+    setAutoJumpFirstDiff(prefs.auto_jump_first_diff ?? true);
+    setWrapAroundNavigation(prefs.wrap_around_navigation ?? true);
+    setConfirmExitDirty(prefs.confirm_before_exit_dirty ?? true);
+    setRecentLeftPaths(prefs.recent_left_paths ?? []);
+    setRecentRightPaths(prefs.recent_right_paths ?? []);
+  };
+
+  let mountedOnce = false;
+  createEffect(() => {
+    const prefs = props.userPrefs;
+    if (!prefs) return;
+    untrack(() => applyUserPreferences(prefs, mountedOnce));
+  });
+
+  onMount(async () => {
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("click", dismissMenus);
+    const prefs = props.userPrefs ?? (await callRustRpc<UserPreferencesDto>("get_user_preferences"));
+    if (prefs) {
+      applyUserPreferences(prefs, false);
+    }
+    mountedOnce = true;
     if (props.initialLeftPath || props.initialRightPath) {
       await handleLoadDiskPaths(props.initialLeftPath, props.initialRightPath);
     }
   });
 
   onCleanup(() => {
-    window.removeEventListener("keydown", handleKeyDown);
+    document.removeEventListener("keydown", handleKeyDown);
     window.removeEventListener("click", dismissMenus);
   });
 
@@ -861,7 +1106,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <button
             class="bc-tool-btn"
             onClick={() => jumpToHunk(-1)}
-            disabled={summary().hunks.length === 0}
+            disabled={
+              summary().hunks.length === 0 ||
+              (!wrapAroundNavigation() && activeHunkIdx() <= 0)
+            }
             title={t("text_diff.prev_diff_tip")}
           >
             {t("text_diff.prev_diff")}
@@ -869,7 +1117,10 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <button
             class="bc-tool-btn"
             onClick={() => jumpToHunk(1)}
-            disabled={summary().hunks.length === 0}
+            disabled={
+              summary().hunks.length === 0 ||
+              (!wrapAroundNavigation() && activeHunkIdx() >= summary().hunks.length - 1)
+            }
             title={t("text_diff.next_diff_tip")}
           >
             {t("text_diff.next_diff")}
@@ -899,6 +1150,20 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             title={t("text_diff.view_rules_tip")}
           >
             {t("text_diff.view_rules_btn")} ▾
+          </button>
+          <button
+            class={`bc-tool-btn ${showSearchBar() ? "active" : ""}`}
+            onClick={openSearchBar}
+            title={t("text_diff.search_btn_tip")}
+          >
+            {t("text_diff.search_btn")}
+          </button>
+          <button
+            class={`bc-tool-btn ${showGotoBar() ? "active" : ""}`}
+            onClick={openGotoBar}
+            title={t("text_diff.goto_tip")}
+          >
+            {t("text_diff.goto_btn")}
           </button>
         </div>
 
@@ -959,7 +1224,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             }
             onBlur={() => {
               const p = leftPath().trim();
-              if (p && !p.startsWith("(") && !summary().left_dirty) {
+              if (p && !p.startsWith("(") && !summary().left_dirty && p !== lastLoadedLeftPath) {
                 handleLoadSingleDiskFile(true, p);
               }
             }}
@@ -1000,7 +1265,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             }
             onBlur={() => {
               const p = rightPath().trim();
-              if (p && !p.startsWith("(") && !summary().right_dirty) {
+              if (p && !p.startsWith("(") && !summary().right_dirty && p !== lastLoadedRightPath) {
                 handleLoadSingleDiskFile(false, p);
               }
             }}
@@ -1020,6 +1285,123 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           </button>
         </div>
       </div>
+
+      {/* Inline Search Bar (Ctrl+F) */}
+      <Show when={showSearchBar()}>
+        <div class="inline-search-bar">
+          <input
+            ref={searchInputRef}
+            class="inline-search-input"
+            placeholder={t("text_diff.search_placeholder")}
+            value={searchQuery()}
+            onInput={(e) => {
+              setSearchQuery(e.currentTarget.value);
+              jumpToSearchMatch(0, true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                jumpToSearchMatch(e.shiftKey ? -1 : 1);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowSearchBar(false);
+              }
+            }}
+          />
+          <select
+            class="inline-search-select"
+            value={searchScope()}
+            onChange={(e) => {
+              setSearchScope(e.currentTarget.value as SearchScope);
+              jumpToSearchMatch(0, true);
+            }}
+          >
+            <option value="both">{t("text_diff.search_scope_both")}</option>
+            <option value="left">{t("text_diff.search_scope_left")}</option>
+            <option value="right">{t("text_diff.search_scope_right")}</option>
+          </select>
+          <button
+            class={`bc-tool-btn ${searchCaseSensitive() ? "active" : ""}`}
+            onClick={() => {
+              setSearchCaseSensitive((v) => !v);
+              jumpToSearchMatch(0, true);
+            }}
+            title={t("text_diff.search_case_tip")}
+          >
+            Aa
+          </button>
+          <span class="inline-search-count">
+            {searchQuery()
+              ? searchMatches().length > 0
+                ? `${Math.min(activeMatchIdx() + 1, searchMatches().length)} / ${searchMatches().length}`
+                : t("text_diff.search_no_matches")
+              : ""}
+          </span>
+          <button
+            class="bc-tool-btn"
+            disabled={searchMatches().length === 0}
+            onClick={() => jumpToSearchMatch(-1)}
+            title={t("text_diff.search_prev_tip")}
+          >
+            ↑
+          </button>
+          <button
+            class="bc-tool-btn"
+            disabled={searchMatches().length === 0}
+            onClick={() => jumpToSearchMatch(1)}
+            title={t("text_diff.search_next_tip")}
+          >
+            ↓
+          </button>
+          <button
+            class="modal-close-btn"
+            onClick={() => setShowSearchBar(false)}
+            title={t("common.close")}
+          >
+            ×
+          </button>
+        </div>
+      </Show>
+
+      {/* Inline Go-To Line Bar (Ctrl+G) */}
+      <Show when={showGotoBar()}>
+        <div class="inline-search-bar">
+          <span class="inline-goto-label">
+            {t("text_diff.goto_label")} ({focusedSide() === "left" ? t("text_diff.side_left") : t("text_diff.side_right")})
+          </span>
+          <input
+            ref={gotoInputRef}
+            class="inline-search-input"
+            style={{ "max-width": "220px" }}
+            type="number"
+            min="1"
+            placeholder={t("text_diff.goto_placeholder")}
+            value={gotoLineInput()}
+            onInput={(e) => setGotoLineInput(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                executeGotoLine();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowGotoBar(false);
+              }
+            }}
+          />
+          <button class="bc-tool-btn active" onClick={executeGotoLine}>
+            {t("text_diff.goto_go")}
+          </button>
+          <button
+            class="modal-close-btn"
+            onClick={() => setShowGotoBar(false)}
+            title={t("common.close")}
+          >
+            ×
+          </button>
+        </div>
+      </Show>
 
       {/* Main Stage: Optional Changed Files Sidebar + Custom Virtual Scrolling Viewport */}
       <div style={{ display: "flex", flex: "1", "min-height": "0", overflow: "hidden" }}>
@@ -1107,7 +1489,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           activeHunkId={currentHunk()?.id ?? null}
           selectedRowIdx={selectedRow()?.virtual_idx ?? null}
           editorFontSize={editorFontSize()}
+          tabWidth={tabWidth()}
           showWhitespaceGlyphs={showWhitespaceGlyphs()}
+          syntaxHighlighting={syntaxHighlighting()}
           fetchSlice={fetchSlice}
           onFocusSide={(side) => {
             setFocusedSide(side);
@@ -1118,6 +1502,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           onPasteToSide={handlePasteTextToSide}
           onSelectRow={(row) => {
             setAllSelectedSide(null);
+            searchAnchorVirtualIdx = row.virtual_idx;
+            searchAnchorDirty = true;
             if (
               row.status === "modified" &&
               (!row.left_inline?.length || !row.right_inline?.length) &&
@@ -1137,6 +1523,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           onMergeHunk={handleMergeHunk}
           onEditLine={handleEditLine}
           scrollTriggerRow={scrollTriggerRow()}
+          scrollTriggerTick={scrollTriggerTick()}
+          activeSearchRowIdx={activeSearchRowIdx()}
+          searchMatchSet={searchMatchSet()}
           onContextMenu={(e, row, side) => {
             const menuWidth = 240;
             const menuHeight = 360;
@@ -1191,7 +1580,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <div class="inspector-rows">
             <div class="inspector-line left-detail">
               <span class="inspector-side-label">{t("text_diff.side_left")}</span>
-              <code class="inspector-code">
+              <code class="inspector-code" style={{ "tab-size": tabWidth() }}>
                 <Show
                   when={selectedRow()}
                   fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
@@ -1222,7 +1611,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             </div>
             <div class="inspector-line right-detail">
               <span class="inspector-side-label">{t("text_diff.side_right")}</span>
-              <code class="inspector-code">
+              <code class="inspector-code" style={{ "tab-size": tabWidth() }}>
                 <Show
                   when={selectedRow()}
                   fallback={<span class="empty-placeholder">{t("text_diff.empty_line")}</span>}
@@ -1275,6 +1664,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               {t("text_diff.side_left")}: {summary().left_line_count} {t("text_diff.line_count", { count: "" }).trim()} | {t("text_diff.side_right")}: {summary().right_line_count} {t("text_diff.line_count", { count: "" }).trim()}
             </span>
           </Show>
+          <span class="statusbar-item" title={t("text_diff.encoding")}>
+            {summary().left_encoding}/{summary().left_line_ending} ↔ {summary().right_encoding}/{summary().right_line_ending}
+          </span>
         </div>
 
         <div class="statusbar-center">

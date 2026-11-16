@@ -6,6 +6,7 @@
 //! - Optional-value flags: `-qc` / `-quickcompare[=<mode>]`
 //! - Standard BC 3/4-way path ordering: `<left> <right> <center/base> [<output>]`
 
+use crate::buffer::expand_path;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -124,7 +125,7 @@ impl CliInvocation {
             let arg = &args[i];
 
             if stop_flags {
-                inv.paths.push(PathBuf::from(arg));
+                inv.paths.push(expand_path(arg));
                 i += 1;
                 continue;
             }
@@ -214,7 +215,7 @@ impl CliInvocation {
                     }
                     "mergeoutput" => {
                         let val = require_flag_value(&key, inline_val, &args, &mut i)?;
-                        inv.merge_output = Some(PathBuf::from(val));
+                        inv.merge_output = Some(expand_path(val));
                     }
                     // Quick compare (value is OPTIONAL!)
                     "qc" | "quickcompare" => {
@@ -271,7 +272,7 @@ impl CliInvocation {
                 continue;
             }
 
-            inv.paths.push(PathBuf::from(arg));
+            inv.paths.push(expand_path(arg));
             i += 1;
         }
 

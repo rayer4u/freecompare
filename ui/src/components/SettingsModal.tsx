@@ -1,6 +1,7 @@
-import { Component, createSignal, For, onMount, Show } from "solid-js";
+import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { AppInfoDto, callRustRpc, UserPreferencesDto } from "../bridge";
 import { currentLocale, setLocale, t } from "../i18n";
+import { parseGlobsInput } from "../utils/preferences";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -19,7 +20,16 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     setTimeout(() => setToast(null), 2500);
   };
 
+  const handleModalKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onClose();
+    }
+  };
+
   onMount(async () => {
+    document.addEventListener("keydown", handleModalKeyDown, true);
     const data = await callRustRpc<UserPreferencesDto>("get_user_preferences");
     if (data) {
       setPrefs(data);
@@ -29,6 +39,10 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     if (info) {
       setAppInfo(info);
     }
+  });
+
+  onCleanup(() => {
+    document.removeEventListener("keydown", handleModalKeyDown, true);
   });
 
   const updateField = async <K extends keyof UserPreferencesDto>(key: K, val: UserPreferencesDto[K]) => {
@@ -42,11 +56,13 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     }
   };
 
-  const saveGlobs = async () => {
-    const parsed = globsInput()
-      .split(/[,;\n]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+  const saveGlobs = async (silentIfUnchanged = false) => {
+    const parsed = parseGlobsInput(globsInput());
+    const existing = prefs()?.folder_exclude_globs ?? [];
+    const unchanged =
+      parsed.length === existing.length &&
+      parsed.every((val, i) => val === existing[i]);
+    if (silentIfUnchanged && unchanged) return;
     await updateField("folder_exclude_globs", parsed);
     notify(t("settings.globs_saved"));
   };
@@ -232,6 +248,15 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                       </div>
 
                       <div class="settings-row">
+                        <span>{t("settings.syntax_hl")}</span>
+                        <input
+                          type="checkbox"
+                          checked={p().syntax_highlighting}
+                          onChange={(e) => updateField("syntax_highlighting", e.currentTarget.checked)}
+                        />
+                      </div>
+
+                      <div class="settings-row">
                         <span>{t("settings.line_inspector")}</span>
                         <input
                           type="checkbox"
@@ -332,10 +357,11 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                           }}
                           value={globsInput()}
                           onInput={(e) => setGlobsInput(e.currentTarget.value)}
+                          onBlur={() => saveGlobs(true)}
                           placeholder=".git, node_modules, target, .DS_Store, *.log"
                         />
                         <div style={{ "margin-top": "6px", display: "flex", "justify-content": "flex-end" }}>
-                          <button class="bc-tool-btn" onClick={saveGlobs}>
+                          <button class="bc-tool-btn" onClick={() => saveGlobs(false)}>
                             {t("settings.save_globs")}
                           </button>
                         </div>

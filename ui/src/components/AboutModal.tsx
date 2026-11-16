@@ -1,4 +1,4 @@
-import { Component, createSignal, onMount, Show } from "solid-js";
+import { Component, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AppInfoDto, callRustRpc } from "../bridge";
 import { t } from "../i18n";
 
@@ -15,11 +15,24 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
     setTimeout(() => setToast(null), 2500);
   };
 
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onClose();
+    }
+  };
+
   onMount(async () => {
+    document.addEventListener("keydown", handleKeyDown, true);
     const info = await callRustRpc<AppInfoDto>("get_app_info");
     if (info) {
       setAppInfo(info);
     }
+  });
+
+  onCleanup(() => {
+    document.removeEventListener("keydown", handleKeyDown, true);
   });
 
   const copyText = async (text: string, label: string) => {
@@ -43,13 +56,6 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
       `Build Profile: ${info.build_profile}`,
     ].join("\n");
     await copyText(text, t("about.copied_all"));
-  };
-
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      props.onClose();
-    }
   };
 
   return (

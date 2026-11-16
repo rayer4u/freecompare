@@ -4,7 +4,8 @@ use freecompare_core::{
     cli_args::{exit_codes, CliInvocation},
     expand_path,
     folder::{compare_folders, FolderCompareOptions},
-    DiffOptions, ThreeWaySession, TwoWaySession, UserPreferences,
+    normalize_line_endings, DiffOptions, TextBuffer, ThreeWaySession, TwoWaySession,
+    UserPreferences,
 };
 use serde_json::{json, Value};
 use std::env;
@@ -339,22 +340,18 @@ fn execute_guard_mode() -> Result<()> {
         return Ok(());
     }
 
-    // Skip internal system logs, git internals, transcripts, and agent configs
-    let norm = target_path_str.replace('\\', "/");
-    if norm.contains(".system_generated")
-        || norm.contains(".gemini")
-        || norm.contains("/tmp/")
-        || norm.contains(".git/")
-        || norm.contains(".agents/")
-    {
+    let target_path = expand_path(target_path_str);
+
+    // Skip internal system logs, git internals, transcripts, temp dirs, and agent configs
+    if is_guard_exempt_path(&target_path) {
         println!("{}", json!({ "decision": "allow" }));
         return Ok(());
     }
 
-    let target_path = expand_path(target_path_str);
-
     let old_content = if target_path.is_file() {
-        fs::read_to_string(&target_path).unwrap_or_default()
+        TextBuffer::from_file(&target_path)
+            .map(|b| b.full_text())
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -364,13 +361,14 @@ fn execute_guard_mode() -> Result<()> {
             let content = payload["toolCall"]["args"]["Content"]
                 .as_str()
                 .unwrap_or("");
+            let normalized_content = normalize_line_endings(content);
             let append = payload["toolCall"]["args"]["Append"]
                 .as_bool()
                 .unwrap_or(false);
             if append && target_path.is_file() {
-                format!("{}{}", old_content, content)
+                format!("{}{}", old_content, normalized_content)
             } else {
-                content.to_string()
+                normalized_content
             }
         }
         "edit_file" => {
@@ -378,10 +376,12 @@ fn execute_guard_mode() -> Result<()> {
             let replacement = payload["toolCall"]["args"]["Replacement"]
                 .as_str()
                 .unwrap_or("");
-            if target.is_empty() {
+            let norm_target = normalize_line_endings(target);
+            let norm_replacement = normalize_line_endings(replacement);
+            if norm_target.is_empty() {
                 old_content.clone()
             } else {
-                old_content.replace(target, replacement)
+                old_content.replace(&norm_target, &norm_replacement)
             }
         }
         _ => {
@@ -415,7 +415,7 @@ fn execute_guard_mode() -> Result<()> {
 
     let status = Command::new(&exe)
         .arg("-review")
-        .arg("-ro1")
+        .arg("-ro")
         .arg(format!("-title1={}", title1))
         .arg(format!("-title2={}", title2))
         .arg(&old_file)
@@ -448,6 +448,26 @@ fn execute_guard_mode() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_guard_exempt_path(target_path: &Path) -> bool {
+    let raw_temp = std::env::temp_dir();
+    let sys_temp = expand_path(&raw_temp);
+    if target_path.starts_with(&raw_temp)
+        || (!sys_temp.as_os_str().is_empty() && target_path.starts_with(&sys_temp))
+    {
+        return true;
+    }
+    let norm = target_path.to_string_lossy().replace('\\', "/");
+    if norm.contains("/tmp/") {
+        return true;
+    }
+    target_path.components().any(|comp| {
+        matches!(
+            comp.as_os_str().to_str(),
+            Some(".git" | ".agents" | ".gemini" | ".system_generated")
+        )
+    })
 }
 
 /// Resolves the current executable path normalized for cross-platform Git configuration
@@ -1003,12 +1023,6 @@ fn spawn_native_app_window(
     let app_arg = format!("--app={url}");
     let width = prefs.window_width.max(640);
     let height = prefs.window_height.max(480);
-    #[cfg(target_os = "linux")]
-    let (width, height) = if !prefs.window_maximized {
-        (width.min(1200), height.min(760))
-    } else {
-        (width, height)
-    };
     let size_arg = format!("--window-size={width},{height}");
     let pos_arg = prefs
         .window_x

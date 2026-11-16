@@ -1,4 +1,4 @@
-use crate::buffer::{BufferError, TextBuffer};
+use crate::buffer::{encode_string, expand_path, BufferError, EncodingKind, LineEnding, TextBuffer};
 use imara_diff::{diff, intern::InternedInput, Algorithm};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
@@ -93,7 +93,7 @@ impl ThreeWaySession {
             left: TextBuffer::from_file(left_path)?,
             base: TextBuffer::from_file(base_path)?,
             right: TextBuffer::from_file(right_path)?,
-            output_path,
+            output_path: output_path.map(expand_path),
             rows: Vec::new(),
             hunks: Vec::new(),
             merged_lines: Vec::new(),
@@ -370,25 +370,51 @@ impl ThreeWaySession {
         self.rows[s..e].to_vec()
     }
 
+    fn effective_encoding_and_line_ending(&self) -> (EncodingKind, LineEnding) {
+        let encoding = if self.base.line_count() > 0 || self.base.encoding() != EncodingKind::Utf8 {
+            self.base.encoding()
+        } else if self.left.line_count() > 0 || self.left.encoding() != EncodingKind::Utf8 {
+            self.left.encoding()
+        } else {
+            self.right.encoding()
+        };
+        let line_ending = if self.base.line_count() > 0 {
+            self.base.line_ending()
+        } else if self.left.line_count() > 0 {
+            self.left.line_ending()
+        } else {
+            self.right.line_ending()
+        };
+        (encoding, line_ending)
+    }
+
     pub fn save_merged(&self, target_path: Option<&Path>) -> Result<(), BufferError> {
         let out_path = match target_path
-            .or(self.output_path.as_deref())
-            .or(self.base.path())
-            .or(self.left.path())
+            .map(expand_path)
+            .or_else(|| self.output_path.as_deref().map(expand_path))
+            .or_else(|| self.base.path().map(expand_path))
+            .or_else(|| self.left.path().map(expand_path))
         {
-            Some(p) => p.to_path_buf(),
-            None => {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => {
                 return Err(BufferError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "No output file path specified for 3-way merge",
                 )))
             }
         };
-        let mut content = self.merged_lines.join(self.base.line_ending().as_str());
-        if !content.is_empty() {
-            content.push_str(self.base.line_ending().as_str());
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
         }
-        std::fs::write(out_path, content.as_bytes())?;
+        let (encoding, line_ending) = self.effective_encoding_and_line_ending();
+        let mut content = self.merged_lines.join(line_ending.as_str());
+        if !content.is_empty() {
+            content.push_str(line_ending.as_str());
+        }
+        let bytes = encode_string(&content, encoding);
+        std::fs::write(out_path, bytes)?;
         Ok(())
     }
 }

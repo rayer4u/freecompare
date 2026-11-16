@@ -424,3 +424,116 @@ fn test_folder_compare_multi_level_lazy_and_recursive_modes() {
     assert_eq!(leaf.relative_path, "level1/level2/level3/leaf.txt");
     assert_eq!(leaf.status, FolderItemStatus::Modified);
 }
+
+#[test]
+fn test_cr_line_ending_and_encodings_roundtrip_two_way_and_three_way() {
+    let dir = tempdir().unwrap();
+
+    // 1. Classic CR (`\r`) line endings + UTF-8 BOM in TextBuffer
+    let cr_path = dir.path().join("legacy_cr.txt");
+    let mut cr_bom_bytes = vec![0xEF, 0xBB, 0xBF];
+    cr_bom_bytes.extend_from_slice(b"first\rsecond\rthird\r");
+    fs::write(&cr_path, &cr_bom_bytes).unwrap();
+
+    let mut buf = TextBuffer::from_file(&cr_path).unwrap();
+    assert_eq!(buf.encoding(), EncodingKind::Utf8Bom);
+    assert_eq!(buf.line_ending(), LineEnding::Cr);
+    assert_eq!(buf.line_count(), 3);
+    buf.edit_line(1, "SECOND_EDITED".to_string()).unwrap();
+    buf.save(None).unwrap();
+
+    let saved_cr = fs::read(&cr_path).unwrap();
+    let mut expected_cr = vec![0xEF, 0xBB, 0xBF];
+    expected_cr.extend_from_slice(b"first\rSECOND_EDITED\rthird\r");
+    assert_eq!(saved_cr, expected_cr);
+
+    // 2. ThreeWaySession preserves GB18030 + CRLF on save_merged
+    let base_p = dir.path().join("base_gbk.txt");
+    let left_p = dir.path().join("left_gbk.txt");
+    let right_p = dir.path().join("right_gbk.txt");
+    let out_p = dir.path().join("sub_out").join("merged_gbk.txt");
+
+    let encode_gbk_crlf = |s: &str| {
+        let crlf = s.replace('\n', "\r\n");
+        freecompare_core::encode_string(&crlf, EncodingKind::Gb18030)
+    };
+    fs::write(&base_p, encode_gbk_crlf("标题\n内容A\n内容B\n")).unwrap();
+    fs::write(&left_p, encode_gbk_crlf("标题\n内容A_左改\n内容B\n")).unwrap();
+    fs::write(&right_p, encode_gbk_crlf("标题\n内容A\n内容B_右改\n")).unwrap();
+
+    let session = ThreeWaySession::from_files(&left_p, &base_p, &right_p, Some(out_p.clone())).unwrap();
+    assert_eq!(session.summary().unresolved_conflicts, 0);
+    session.save_merged(None).unwrap();
+
+    let merged_bytes = fs::read(&out_p).unwrap();
+    let expected_merged = encode_gbk_crlf("标题\n内容A_左改\n内容B_右改\n");
+    assert_eq!(merged_bytes, expected_merged);
+
+    // 3. ThreeWaySession preserves UTF-16 LE + CR on save_merged
+    let u16_base = dir.path().join("base_u16.txt");
+    let u16_left = dir.path().join("left_u16.txt");
+    let u16_right = dir.path().join("right_u16.txt");
+    let u16_out = dir.path().join("merged_u16.txt");
+
+    fs::write(
+        &u16_base,
+        freecompare_core::encode_string("a\rb\rc\r", EncodingKind::Utf16Le),
+    )
+    .unwrap();
+    fs::write(
+        &u16_left,
+        freecompare_core::encode_string("a_L\rb\rc\r", EncodingKind::Utf16Le),
+    )
+    .unwrap();
+    fs::write(
+        &u16_right,
+        freecompare_core::encode_string("a\rb\rc_R\r", EncodingKind::Utf16Le),
+    )
+    .unwrap();
+
+    let u16_session =
+        ThreeWaySession::from_files(&u16_left, &u16_base, &u16_right, Some(u16_out.clone())).unwrap();
+    u16_session.save_merged(None).unwrap();
+    let saved_u16 = fs::read(&u16_out).unwrap();
+    assert_eq!(
+        saved_u16,
+        freecompare_core::encode_string("a_L\rb\rc_R\r", EncodingKind::Utf16Le)
+    );
+}
+
+#[test]
+fn test_folder_compare_streaming_blake3_and_parallel_hashing() {
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+
+    // Create multiple files including large (>256 KiB) payloads to exercise streaming BLAKE3 + rayon
+    for idx in 0..12 {
+        let name = format!("blob_{idx:02}.bin");
+        let mut payload = vec![(idx as u8).wrapping_mul(17); 256 * 1024 + idx * 137];
+        fs::write(left_dir.path().join(&name), &payload).unwrap();
+        if idx % 3 == 0 {
+            // Same size, single byte changed near the tail (tests full streaming hash, not head-only!)
+            let last = payload.len() - 1;
+            payload[last] ^= 0xFF;
+        }
+        fs::write(right_dir.path().join(&name), &payload).unwrap();
+    }
+
+    let opts = FolderCompareOptions {
+        mode: FolderCompareMode::ContentHash,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: false,
+        max_depth: None,
+    };
+
+    let res = compare_folders(left_dir.path(), right_dir.path(), &opts).unwrap();
+    assert_eq!(res.stats.total_items, 12);
+    assert_eq!(res.stats.modified_items, 4); // idx 0, 3, 6, 9
+    assert_eq!(res.stats.equal_items, 8);
+    // Verify deterministic sorted order
+    let names: Vec<&str> = res.entries.iter().map(|e| e.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted);
+}

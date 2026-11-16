@@ -10,7 +10,10 @@ pub mod folder;
 pub mod session;
 pub mod syntax;
 
-pub use buffer::{expand_path, EncodingKind, LineEnding, TextBuffer};
+pub use buffer::{
+    detect_file_format, detect_line_ending, detect_line_ending_opt, encode_string, expand_path,
+    normalize_line_endings, EncodingKind, LineEnding, TextBuffer,
+};
 pub use cli_args::{
     exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode,
 };
