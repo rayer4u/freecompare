@@ -114,6 +114,12 @@ impl AppBackend {
     /// Configures startup session from a parsed `CliInvocation` (supports 0..4 paths + BC flags).
     pub fn configure_from_cli(&self, inv: &CliInvocation) -> Result<StartupLaunchSession, String> {
         let paths = &inv.paths;
+        let seq_index = std::env::var("GIT_DIFF_PATH_COUNTER")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        let seq_total = std::env::var("GIT_DIFF_PATH_TOTAL")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
         match paths.len() {
             0 => {
                 let kind = match inv.forced_viewer {
@@ -138,6 +144,8 @@ impl AppBackend {
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
                     review_mode: inv.review_mode,
+                    seq_index,
+                    seq_total,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -168,6 +176,8 @@ impl AppBackend {
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
                     review_mode: inv.review_mode,
+                    seq_index,
+                    seq_total,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -208,6 +218,8 @@ impl AppBackend {
                         expand_all: inv.expand_all,
                         filters: inv.filters.clone(),
                         review_mode: inv.review_mode,
+                        seq_index,
+                        seq_total,
                     };
                     *self.manager.startup_session.write() = Some(launch.clone());
                     Ok(launch)
@@ -230,6 +242,8 @@ impl AppBackend {
                         expand_all: inv.expand_all,
                         filters: inv.filters.clone(),
                         review_mode: inv.review_mode,
+                        seq_index,
+                        seq_total,
                     };
                     *self.manager.startup_session.write() = Some(launch.clone());
                     Ok(launch)
@@ -292,6 +306,8 @@ impl AppBackend {
                     expand_all: inv.expand_all,
                     filters: inv.filters.clone(),
                     review_mode: inv.review_mode,
+                    seq_index,
+                    seq_total,
                 };
                 *self.manager.startup_session.write() = Some(launch.clone());
                 Ok(launch)
@@ -905,10 +921,15 @@ impl AppBackend {
                 let commands: &[(&str, &str)] = &[
                     ("diff.tool", "bc"),
                     ("difftool.prompt", "false"),
+                    ("difftool.trustExitCode", "true"),
                     ("difftool.bc.path", &stripped),
+                    ("difftool.bc.trustExitCode", "true"),
                     ("difftool.bc3.path", &stripped),
+                    ("difftool.bc3.trustExitCode", "true"),
                     ("difftool.bc4.path", &stripped),
+                    ("difftool.bc4.trustExitCode", "true"),
                     ("difftool.freecompare.cmd", &diff_cmd),
+                    ("difftool.freecompare.trustExitCode", "true"),
                     ("merge.tool", "bc"),
                     ("mergetool.prompt", "false"),
                     ("mergetool.bc.path", &stripped),

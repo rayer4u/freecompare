@@ -12,10 +12,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -148,25 +148,45 @@ fn main() -> Result<()> {
         }
     }
 
-    let bind_addr = format!("127.0.0.1:{}", inv.port_override.unwrap_or(0));
-    let listener = TcpListener::bind(&bind_addr)?;
+    let listener = if let Some(port) = inv.port_override {
+        TcpListener::bind(format!("127.0.0.1:{port}"))?
+    } else {
+        // Prefer deterministic local port 43199 so sequential invocations (e.g. `git difftool`)
+        // share the same origin in Chromium's app_window_placement, falling back if busy.
+        TcpListener::bind("127.0.0.1:43199")
+            .or_else(|_| TcpListener::bind("127.0.0.1:43200"))
+            .or_else(|_| TcpListener::bind("127.0.0.1:0"))?
+    };
     let local_port = listener.local_addr()?.port();
     let ui_url = format!("http://127.0.0.1:{local_port}");
     let ui_dist = locate_ui_dist();
     let tracker = Arc::new(LifecycleTracker::new());
+    let browser_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let profile_dir = resolve_browser_profile_dir(local_port);
 
     if !inv.silent {
         println!("🚀 FreeCompare UI listening at {ui_url}");
     }
 
-    if !inv.no_open_window {
+    let disable_browser = inv.no_open_window
+        || env::var("FREECOMPARE_NO_OPEN").is_ok()
+        || env::var("CI").is_ok();
+    if !disable_browser {
         let initial_prefs = backend.get_user_preferences();
-        spawn_native_app_window(&ui_url, &initial_prefs);
+        if let Some(ref pdir) = profile_dir {
+            sync_chromium_profile_from_prefs(pdir, &initial_prefs, local_port);
+        }
+        let spawned = spawn_native_app_window(&ui_url, &initial_prefs, profile_dir.as_deref());
+        if let Ok(mut guard) = browser_child.lock() {
+            *guard = spawned;
+        }
         let tracker_watchdog = Arc::clone(&tracker);
         let backend_watchdog = Arc::clone(&backend);
+        let child_watchdog = Arc::clone(&browser_child);
+        let profile_watchdog = profile_dir.clone();
         std::thread::spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(Duration::from_millis(250));
                 let active = tracker_watchdog.active_connections.load(Ordering::SeqCst);
                 let idle_ms = now_ms().saturating_sub(
                     tracker_watchdog.last_heartbeat_ms.load(Ordering::SeqCst),
@@ -178,13 +198,27 @@ fn main() -> Result<()> {
                 }
 
                 // If explicit shutdown was requested (e.g. pagehide / tab close) and no active connections
-                if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) && idle_ms >= 600 {
-                    std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
+                if tracker_watchdog.shutdown_requested.load(Ordering::SeqCst) && idle_ms >= 350 {
+                    let code = backend_watchdog.exit_code.load(Ordering::SeqCst);
+                    graceful_exit(
+                        code,
+                        &backend_watchdog,
+                        &child_watchdog,
+                        profile_watchdog.as_deref(),
+                        local_port,
+                    );
                 }
 
-                // Fallback watchdog: if client connected before, but all connections have closed and stayed 0 for 1200ms
-                if tracker_watchdog.client_connected.load(Ordering::SeqCst) && idle_ms >= 1200 {
-                    std::process::exit(backend_watchdog.exit_code.load(Ordering::SeqCst));
+                // Fallback watchdog: if client connected before, but all connections have closed and stayed 0 for 900ms
+                if tracker_watchdog.client_connected.load(Ordering::SeqCst) && idle_ms >= 900 {
+                    let code = backend_watchdog.exit_code.load(Ordering::SeqCst);
+                    graceful_exit(
+                        code,
+                        &backend_watchdog,
+                        &child_watchdog,
+                        profile_watchdog.as_deref(),
+                        local_port,
+                    );
                 }
             }
         });
@@ -194,12 +228,17 @@ fn main() -> Result<()> {
         let backend_ref = Arc::clone(&backend);
         let dist_ref = ui_dist.clone();
         let tracker_ref = Arc::clone(&tracker);
+        let child_ref = Arc::clone(&browser_child);
+        let profile_ref = profile_dir.clone();
         std::thread::spawn(move || {
             let _ = handle_http_connection(
                 stream,
                 &backend_ref,
                 dist_ref.as_deref(),
                 &tracker_ref,
+                &child_ref,
+                profile_ref.as_deref(),
+                local_port,
             );
         });
     }
@@ -449,7 +488,9 @@ fn handle_git_integration(install: bool) -> Result<()> {
         println!("# ============================================================================");
         println!("git config --global diff.tool bc");
         println!("git config --global difftool.prompt false");
+        println!("git config --global difftool.trustExitCode true");
         println!("git config --global difftool.bc.path \"{exe_path}\"");
+        println!("git config --global difftool.bc.trustExitCode true");
         println!("git config --global merge.tool bc");
         println!("git config --global mergetool.prompt false");
         println!("git config --global mergetool.bc.path \"{exe_path}\"");
@@ -459,7 +500,9 @@ fn handle_git_integration(install: bool) -> Result<()> {
         println!("# 方案 B: 注册独立的 `freecompare` 驱动 (自动携带自定义标题栏与 -automerge)");
         println!("# ============================================================================");
         println!("git config --global diff.tool freecompare");
+        println!("git config --global difftool.trustExitCode true");
         println!("git config --global difftool.freecompare.cmd '{diff_cmd}'");
+        println!("git config --global difftool.freecompare.trustExitCode true");
         println!("git config --global merge.tool freecompare");
         println!("git config --global mergetool.freecompare.cmd '{merge_cmd}'");
         println!("git config --global mergetool.freecompare.trustExitCode true");
@@ -479,10 +522,15 @@ fn handle_git_integration(install: bool) -> Result<()> {
     let commands: &[(&str, &str)] = &[
         ("diff.tool", "bc"),
         ("difftool.prompt", "false"),
+        ("difftool.trustExitCode", "true"),
         ("difftool.bc.path", &exe_path),
+        ("difftool.bc.trustExitCode", "true"),
         ("difftool.bc3.path", &exe_path),
+        ("difftool.bc3.trustExitCode", "true"),
         ("difftool.bc4.path", &exe_path),
+        ("difftool.bc4.trustExitCode", "true"),
         ("difftool.freecompare.cmd", &diff_cmd),
+        ("difftool.freecompare.trustExitCode", "true"),
         ("merge.tool", "bc"),
         ("mergetool.prompt", "false"),
         ("mergetool.bc.path", &exe_path),
@@ -592,9 +640,12 @@ fn run_cli_summary(inv: &CliInvocation) -> Result<()> {
 
 fn handle_http_connection(
     mut stream: std::net::TcpStream,
-    backend: &AppBackend,
+    backend: &Arc<AppBackend>,
     ui_dist: Option<&Path>,
     tracker: &LifecycleTracker,
+    browser_child: &Arc<Mutex<Option<Child>>>,
+    profile_dir: Option<&Path>,
+    local_port: u16,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -675,9 +726,18 @@ fn handle_http_connection(
         if immediate {
             let _ = write_json_response(&mut stream, 200, &json!({ "ok": true }));
             let code = backend.exit_code.load(Ordering::SeqCst);
+            let backend_clone = Arc::clone(backend);
+            let child_clone = Arc::clone(browser_child);
+            let profile_clone = profile_dir.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(80));
-                std::process::exit(code);
+                std::thread::sleep(Duration::from_millis(60));
+                graceful_exit(
+                    code,
+                    &backend_clone,
+                    &child_clone,
+                    profile_clone.as_deref(),
+                    local_port,
+                );
             });
             return Ok(());
         }
@@ -811,10 +871,144 @@ fn locate_ui_dist() -> Option<PathBuf> {
     None
 }
 
-fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
+fn resolve_browser_profile_dir(local_port: u16) -> Option<PathBuf> {
+    let home = env::var("HOME").or_else(|_| env::var("USERPROFILE")).ok()?;
+    let folder = if local_port == 43199 {
+        "browser-profile".to_string()
+    } else {
+        format!("browser-profile-{local_port}")
+    };
+    let dir = PathBuf::from(home)
+        .join(".config")
+        .join("freecompare")
+        .join(folder);
+    let _ = fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+fn sync_chromium_profile_from_prefs(profile_dir: &Path, prefs: &UserPreferences, local_port: u16) {
+    // Clean up any stale singleton locks left over by a previous terminated browser process
+    for lock_name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        let lock_path = profile_dir.join(lock_name);
+        let _ = fs::remove_file(&lock_path);
+    }
+
+    let default_dir = profile_dir.join("Default");
+    let _ = fs::create_dir_all(&default_dir);
+    let pref_file = default_dir.join("Preferences");
+
+    let mut root: Value = fs::read_to_string(&pref_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| json!({}));
+
+    if !root["profile"].is_object() {
+        root["profile"] = json!({});
+    }
+    root["profile"]["exit_type"] = json!("Normal");
+    root["profile"]["exited_cleanly"] = json!(true);
+
+    let width = prefs.window_width.max(640) as i32;
+    let height = prefs.window_height.max(480) as i32;
+    #[cfg(target_os = "linux")]
+    let (width, height) = if !prefs.window_maximized {
+        (width.min(1200), height.min(760))
+    } else {
+        (width, height)
+    };
+    let left = prefs.window_x.unwrap_or(140);
+    let top = prefs.window_y.unwrap_or(90);
+    let right = left + width;
+    let bottom = top + height;
+
+    let placement = json!({
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "maximized": prefs.window_maximized,
+        "docked": false,
+        "always_on_top": false,
+        "work_area_left": 0,
+        "work_area_top": 0,
+        "work_area_right": 3840,
+        "work_area_bottom": 2160
+    });
+
+    if !root["browser"].is_object() {
+        root["browser"] = json!({});
+    }
+    root["browser"]["window_placement"] = placement.clone();
+
+    if !root["browser"]["app_window_placement"].is_object() {
+        root["browser"]["app_window_placement"] = json!({});
+    }
+    if !root["browser"]["app_window_placement"]["127"].is_object() {
+        root["browser"]["app_window_placement"]["127"] = json!({});
+    }
+    if !root["browser"]["app_window_placement"]["127"]["0"].is_object() {
+        root["browser"]["app_window_placement"]["127"]["0"] = json!({});
+    }
+    if !root["browser"]["app_window_placement"]["127"]["0"]["0"].is_object() {
+        root["browser"]["app_window_placement"]["127"]["0"]["0"] = json!({});
+    }
+    root["browser"]["app_window_placement"]["127"]["0"]["0"]["1_/"] = placement.clone();
+    let port_key = format!("1_{local_port}_/");
+    root["browser"]["app_window_placement"]["127"]["0"]["0"][port_key] = placement;
+
+    if let Ok(serialized) = serde_json::to_string(&root) {
+        let _ = fs::write(&pref_file, serialized);
+    }
+}
+
+fn graceful_exit(
+    code: i32,
+    _backend: &AppBackend,
+    browser_child: &Arc<Mutex<Option<Child>>>,
+    profile_dir: Option<&Path>,
+    local_port: u16,
+) -> ! {
+    if let Ok(mut guard) = browser_child.lock() {
+        if let Some(ref mut child) = *guard {
+            let mut exited = false;
+            for _ in 0..50 {
+                if let Ok(Some(_)) = child.try_wait() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            if !exited {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    if let Some(pdir) = profile_dir {
+        if local_port != 43199 {
+            let _ = fs::remove_dir_all(pdir);
+        }
+    }
+
+    std::process::exit(code);
+}
+
+fn spawn_native_app_window(
+    url: &str,
+    prefs: &UserPreferences,
+    profile_dir: Option<&Path>,
+) -> Option<Child> {
     let app_arg = format!("--app={url}");
     let width = prefs.window_width.max(640);
     let height = prefs.window_height.max(480);
+    #[cfg(target_os = "linux")]
+    let (width, height) = if !prefs.window_maximized {
+        (width.min(1200), height.min(760))
+    } else {
+        (width, height)
+    };
     let size_arg = format!("--window-size={width},{height}");
     let pos_arg = prefs
         .window_x
@@ -822,7 +1016,21 @@ fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
         .map(|(x, y)| format!("--window-position={x},{y}"));
 
     let build_chromium_args = || {
-        let mut args = vec![app_arg.clone(), "--new-window".to_string()];
+        let mut args = vec![
+            app_arg.clone(),
+            "--new-window".to_string(),
+            "--no-first-run".to_string(),
+            "--no-default-browser-check".to_string(),
+        ];
+        if let Some(pdir) = profile_dir {
+            args.push(format!("--user-data-dir={}", pdir.display()));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if env::var("DISPLAY").is_ok() {
+                args.push("--ozone-platform=x11".to_string());
+            }
+        }
         if prefs.window_maximized {
             args.push("--start-maximized".to_string());
         } else {
@@ -844,11 +1052,11 @@ fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
             "microsoft-edge",
             "brave-browser",
         ] {
-            if Command::new(bin).args(&args).spawn().is_ok() {
-                return;
+            if let Ok(child) = Command::new(bin).args(&args).spawn() {
+                return Some(child);
             }
         }
-        let _ = Command::new("xdg-open").arg(url).spawn();
+        Command::new("xdg-open").arg(url).spawn().ok()
     }
 
     #[cfg(target_os = "macos")]
@@ -860,13 +1068,13 @@ fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ] {
-            if Path::new(app_bin).is_file()
-                && Command::new(app_bin).args(&args).spawn().is_ok()
-            {
-                return;
+            if Path::new(app_bin).is_file() {
+                if let Ok(child) = Command::new(app_bin).args(&args).spawn() {
+                    return Some(child);
+                }
             }
         }
-        let _ = Command::new("open").arg(url).spawn();
+        Command::new("open").arg(url).spawn().ok()
     }
 
     #[cfg(target_os = "windows")]
@@ -884,12 +1092,13 @@ fn spawn_native_app_window(url: &str, prefs: &UserPreferences) {
             }
         }
         for bin in candidates {
-            if Command::new(&bin).args(&args).spawn().is_ok() {
-                return;
+            if let Ok(child) = Command::new(&bin).args(&args).spawn() {
+                return Some(child);
             }
         }
-        let _ = Command::new("rundll32.exe")
+        Command::new("rundll32.exe")
             .args(["url.dll,FileProtocolHandler", url])
-            .spawn();
+            .spawn()
+            .ok()
     }
 }

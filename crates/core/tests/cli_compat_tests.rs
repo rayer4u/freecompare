@@ -111,3 +111,15 @@ fn test_cli_version_flag() {
     let inv_slash = CliInvocation::parse(["/version"]).unwrap();
     assert!(inv_slash.show_version);
 }
+
+#[test]
+fn test_cli_headless_and_no_open_window_flags() {
+    let inv1 = CliInvocation::parse(["--no-open-window"]).unwrap();
+    assert!(inv1.no_open_window);
+
+    let inv2 = CliInvocation::parse(["-no-open"]).unwrap();
+    assert!(inv2.no_open_window);
+
+    let inv3 = CliInvocation::parse(["/headless"]).unwrap();
+    assert!(inv3.no_open_window);
+}

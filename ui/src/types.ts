@@ -178,4 +178,6 @@ export interface WorkspaceTab {
   filters?: string[];
   siblingFiles?: SiblingDiffFileItem[];
   reviewMode?: boolean;
+  seqIndex?: number | null;
+  seqTotal?: number | null;
 }

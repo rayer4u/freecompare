@@ -61,27 +61,66 @@ export const App: Component = () => {
     }
   };
 
+  let geometryReady = false;
+  let lastGeomKey = "";
+  let lastValidGeom: {
+    window_width: number;
+    window_height: number;
+    window_x: number;
+    window_y: number;
+    window_maximized: boolean;
+  } | null = null;
+
   const collectWindowGeometry = (immediate = false) => {
-    const w = Math.max(640, window.outerWidth || window.innerWidth || 1440);
-    const h = Math.max(480, window.outerHeight || window.innerHeight || 900);
+    const rawW = window.outerWidth || window.innerWidth || 0;
+    const rawH = window.outerHeight || window.innerHeight || 0;
+    if ((rawW < 400 || rawH < 300) && lastValidGeom) {
+      return {
+        immediate,
+        ...lastValidGeom,
+      };
+    }
+    const w = Math.max(640, rawW || 1440);
+    const h = Math.max(480, rawH || 900);
     const x = typeof window.screenX === "number" ? window.screenX : 0;
     const y = typeof window.screenY === "number" ? window.screenY : 0;
-    const availW = window.screen?.availWidth || 1920;
-    const availH = window.screen?.availHeight || 1080;
-    const maximized = w >= availW - 16 && h >= availH - 32;
-    return {
-      immediate,
+    const screenObj = window.screen as unknown as {
+      availWidth?: number;
+      availHeight?: number;
+      availLeft?: number;
+      availTop?: number;
+    };
+    const availW = screenObj?.availWidth || 1920;
+    const availH = screenObj?.availHeight || 1080;
+    const availLeft = screenObj?.availLeft ?? 0;
+    const availTop = screenObj?.availTop ?? 0;
+    const nearOrigin = Math.abs(x - availLeft) <= 24 && Math.abs(y - availTop) <= 64;
+    const maximized = nearOrigin && w >= availW - 16 && h >= availH - 32;
+    const snap = {
       window_width: w,
       window_height: h,
       window_x: x,
       window_y: y,
       window_maximized: maximized,
     };
+    const isBogusZeroOrigin =
+      x === 0 &&
+      y === 0 &&
+      !maximized &&
+      lastValidGeom !== null &&
+      (lastValidGeom.window_x !== 0 || lastValidGeom.window_y !== 0);
+    if (rawW >= 640 && rawH >= 480 && !isBogusZeroOrigin) {
+      lastValidGeom = snap;
+    }
+    return {
+      immediate,
+      ...(lastValidGeom ?? snap),
+    };
   };
 
   onMount(async () => {
-    let lastGeomKey = "";
     const syncWindowGeometry = () => {
+      if (!geometryReady || document.visibilityState !== "visible") return;
       const geom = collectWindowGeometry(false);
       const key = `${geom.window_width}x${geom.window_height}@${geom.window_x},${geom.window_y}:${geom.window_maximized}`;
       if (key !== lastGeomKey) {
@@ -105,8 +144,12 @@ export const App: Component = () => {
 
     const heartbeatTimer = window.setInterval(() => {
       fetch("/api/heartbeat", { method: "POST" }).catch(() => {});
-      syncWindowGeometry();
     }, 1500);
+
+    // Poll window position & size every 250ms while visible (since DOM has no native window `move` event)
+    const geomTimer = window.setInterval(() => {
+      syncWindowGeometry();
+    }, 250);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -117,8 +160,9 @@ export const App: Component = () => {
 
     let resizeDebounce: number | undefined;
     const handleResize = () => {
+      if (!geometryReady) return;
       if (resizeDebounce) window.clearTimeout(resizeDebounce);
-      resizeDebounce = window.setTimeout(syncWindowGeometry, 250);
+      resizeDebounce = window.setTimeout(syncWindowGeometry, 150);
     };
     window.addEventListener("resize", handleResize);
 
@@ -134,7 +178,11 @@ export const App: Component = () => {
       try {
         eventSource?.close();
       } catch {}
-      const payload = JSON.stringify(collectWindowGeometry(false));
+      const payload = JSON.stringify(
+        lastValidGeom
+          ? { immediate: false, ...lastValidGeom }
+          : collectWindowGeometry(false)
+      );
       if (navigator.sendBeacon) {
         navigator.sendBeacon("/api/shutdown", payload);
       } else {
@@ -153,6 +201,7 @@ export const App: Component = () => {
         eventSource?.close();
       } catch {}
       window.clearInterval(heartbeatTimer);
+      window.clearInterval(geomTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("keydown", handleGlobalShortcuts);
@@ -167,18 +216,42 @@ export const App: Component = () => {
     if (prefs?.language === "zh-CN" || prefs?.language === "en-US") {
       setLocale(prefs.language, false);
     }
-    if (prefs && !prefs.window_maximized) {
-      try {
-        if (prefs.window_width >= 640 && prefs.window_height >= 480) {
-          window.resizeTo(prefs.window_width, prefs.window_height);
+    if (prefs) {
+      const initW = Math.max(640, prefs.window_width || 1440);
+      const initH = Math.max(480, prefs.window_height || 900);
+      const initX = prefs.window_x ?? 140;
+      const initY = prefs.window_y ?? 90;
+      lastValidGeom = {
+        window_width: initW,
+        window_height: initH,
+        window_x: initX,
+        window_y: initY,
+        window_maximized: Boolean(prefs.window_maximized),
+      };
+      lastGeomKey = `${initW}x${initH}@${initX},${initY}:${Boolean(prefs.window_maximized)}`;
+
+      if (!prefs.window_maximized) {
+        try {
+          const curW = window.outerWidth || initW;
+          const curH = window.outerHeight || initH;
+          if (Math.abs(curW - initW) > 32 || Math.abs(curH - initH) > 32) {
+            window.resizeTo(initW, initH);
+          }
+          if (prefs.window_x !== null && prefs.window_y !== null) {
+            const curX = typeof window.screenX === "number" ? window.screenX : initX;
+            const curY = typeof window.screenY === "number" ? window.screenY : initY;
+            if (Math.abs(curX - prefs.window_x) > 32 || Math.abs(curY - prefs.window_y) > 32) {
+              window.moveTo(prefs.window_x, prefs.window_y);
+            }
+          }
+        } catch {
+          // Ignore if browser security restricts window.moveTo/resizeTo
         }
-        if (prefs.window_x !== null && prefs.window_y !== null) {
-          window.moveTo(prefs.window_x, prefs.window_y);
-        }
-      } catch {
-        // Ignore if browser security restricts window.moveTo/resizeTo
       }
     }
+    window.setTimeout(() => {
+      geometryReady = true;
+    }, 350);
 
     const startup = await callRustRpc<StartupLaunchSessionDto | null>(
       "get_startup_session"
@@ -191,6 +264,8 @@ export const App: Component = () => {
         expandAll: startup.expand_all,
         filters: startup.filters,
         reviewMode: startup.review_mode,
+        seqIndex: startup.seq_index,
+        seqTotal: startup.seq_total,
       };
       if (startup.kind === "folder_compare") {
         launchSession(
@@ -229,18 +304,19 @@ export const App: Component = () => {
 
       if (e.key === "Escape") {
         const tab = activeTab();
-        const inReview = Boolean(
-          tab?.reviewMode ||
-          tab?.titles?.[0]?.includes("当前文件") ||
-          tab?.titles?.[1]?.includes("AI 拟修改") ||
-          tab?.title?.includes("AI 拟修改")
-        );
-        if (inReview) {
-          e.preventDefault();
-          if (e.shiftKey) {
+        const inReview = isReviewActive();
+        if (e.shiftKey) {
+          if (inReview || (tab && tab.id !== "tab-home")) {
+            e.preventDefault();
             handleRejectActiveSession();
-          } else {
+          }
+        } else {
+          if (inReview) {
+            e.preventDefault();
             handleApproveActiveSession();
+          } else if (tab && tab.id !== "tab-home") {
+            e.preventDefault();
+            handleCloseOrExitActiveSession();
           }
         }
       }
@@ -250,6 +326,7 @@ export const App: Component = () => {
     return () => {
       window.removeEventListener("keydown", handleGlobalKeyDown);
       window.clearInterval(heartbeatTimer);
+      window.clearInterval(geomTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("resize", handleResize);
       window.removeEventListener("pagehide", handlePageHide);
@@ -382,7 +459,39 @@ export const App: Component = () => {
         </div>
 
         <div class="app-header-right">
-          <Show when={isReviewActive()}>
+          <Show
+            when={isReviewActive()}
+            fallback={
+              <Show when={activeTab() && activeTab().id !== "tab-home"}>
+                <div class="header-review-group">
+                  <Show when={(activeTab()?.seqTotal ?? 0) > 1}>
+                    <span class="header-review-tag">
+                      {t("header.seq_badge", {
+                        index: activeTab()?.seqIndex ?? 1,
+                        total: activeTab()?.seqTotal ?? 1,
+                      })}
+                    </span>
+                  </Show>
+                  <button
+                    class="header-review-btn approve"
+                    onClick={handleCloseOrExitActiveSession}
+                    title={t("header.next_file_tooltip")}
+                  >
+                    {(activeTab()?.seqTotal ?? 0) > 1
+                      ? t("header.next_file")
+                      : t("header.close_session")}
+                  </button>
+                  <button
+                    class="header-review-btn reject"
+                    onClick={handleRejectActiveSession}
+                    title={t("header.abort_seq_tooltip")}
+                  >
+                    {t("header.abort_seq")}
+                  </button>
+                </div>
+              </Show>
+            }
+          >
             <div class="header-review-group">
               <span class="header-review-tag">{t("header.review_mode")}</span>
               <button

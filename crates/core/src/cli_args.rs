@@ -156,7 +156,7 @@ impl CliInvocation {
                     "review" | "guard" => {
                         inv.review_mode = true;
                     }
-                    "no-open" | "headless" => {
+                    "no-open" | "no-open-window" | "headless" => {
                         inv.no_open_window = true;
                     }
                     "port" => {
@@ -426,5 +426,8 @@ fn is_known_slash_flag(rest: &str) -> bool {
             | "filter"
             | "fv"
             | "fileviewer"
+            | "no-open"
+            | "no-open-window"
+            | "headless"
     )
 }

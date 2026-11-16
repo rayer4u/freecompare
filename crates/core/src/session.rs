@@ -45,6 +45,8 @@ pub struct StartupLaunchSession {
     pub expand_all: bool,
     pub filters: Vec<String>,
     pub review_mode: bool,
+    pub seq_index: Option<u32>,
+    pub seq_total: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

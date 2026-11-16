@@ -900,19 +900,6 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           >
             {t("text_diff.view_rules_btn")} ▾
           </button>
-          <button
-            class={`bc-tool-btn ${showLineInspector() ? "active" : ""}`}
-            onClick={() => {
-              const next = !showLineInspector();
-              setShowLineInspector(next);
-              callRustRpc("update_user_preferences", {
-                show_line_inspector: next,
-              }).catch(() => {});
-            }}
-            title={t("text_diff.line_inspector_tip")}
-          >
-            {t("text_diff.line_inspector")}
-          </button>
         </div>
 
         <Show when={(props.siblingFiles?.length ?? 0) > 0}>

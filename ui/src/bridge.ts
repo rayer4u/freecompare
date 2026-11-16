@@ -50,6 +50,8 @@ export interface StartupLaunchSessionDto {
   expand_all: boolean;
   filters: string[];
   review_mode: boolean;
+  seq_index?: number | null;
+  seq_total?: number | null;
 }
 
 export interface SessionRecordDto {
