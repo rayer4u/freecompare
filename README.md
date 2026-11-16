@@ -9,17 +9,18 @@
    - 定高极速虚拟行池 + 水平/垂直双栏同步滚动 + Gap 斜纹对齐占位行。
    - 中间 Gutter 绘制 **SVG 三次贝塞尔平滑连接色带** 与 `»` / `«` 块复制快捷按钮。
    - 右侧 **Canvas 全局差异鸟瞰图 (Overview Bar)** 与底部 **单行逐字符放大对比详情栏**。
+   - 内置 **`Ctrl+F` 内联搜索**（支持双侧/左/右作用域、区分大小写、从当前点击行锚点查找）与 **`Ctrl+G` 行号跳转**。
 2. **Rust 高性能核心 (`freecompare-core`)**：
-   - 基于 `ropey` + `imara-diff` (Histogram 算法) + `similar` (字符级细粒度二次 Diff)。
-   - 自动识别 `UTF-8` / `UTF-8 BOM` / `UTF-16 LE/BE` / `GB18030` 编码与 `LF` / `CRLF` 换行符。
+   - 基于 `ropey` + `imara-diff` (Histogram 算法) + `similar` (字符级细粒度二次 Diff)，支持缩进/空行滑块启发式与大差异锚点分治。
+   - 自动识别并**保真回写** `UTF-8` / `UTF-8 BOM` / `UTF-16 LE/BE` / `GB18030` 编码与 `LF` / `CRLF` / `CR` 换行符。
 3. **文件夹对比与同步 (`FolderDiffView`)**：
-   - 支持 **BLAKE3 内容哈希深度比对** 与 **大小+时间戳快扫模式**。
-   - 支持状态过滤（全部 / 仅差异 / 仅孤立项 / 仅相同）与双击直接穿透打开文本对比标签页。
+   - 支持 **流式 BLAKE3 + `rayon` 并行哈希深度比对** 与 **大小+时间戳快扫模式**。
+   - 支持状态过滤、CLI `-filters` 与偏好排除规则联动、跨文件名自由配对对比、目录级左右复制同步、右键确认删除及双击穿透打开文本对比标签页。
 4. **三向合并与 Beyond Compare / Git CLI 完全兼容 (`Merge3WayView` & `fcompare` CLI)**：
-   - 四窗格三向合并（Left / Base / Right + Merged Output），支持一键解决冲突与 `git difftool` / `git mergetool` 无缝替换 `bcompare`。
+   - Left / Base / Right 三栏同步滚动 + Merged Output，支持冲突块快捷键跳转（`n`/`p`、`Alt+Up`/`Alt+Down`、`F7`）、一键解决冲突、未决冲突保存确认与 `git difftool` / `git mergetool` 无缝替换 `bcompare`。
 5. **AI 编程审查守卫 (`fcompare guard` 原生集成)**：
-   - 专为新一代 Agentic AI 工具设计的改动审查机制， 目前已适配Antigravity CLI (agy) 。
-   - 在 AI 执行写文件与代码编辑时自动弹出双栏比对窗口，直观呈现 AI 的修改提议，支持“通过审查”与“拒绝修改”双向操作闭环。
+   - 专为新一代 Agentic AI 工具设计的改动审查机制，目前已适配 Antigravity CLI (agy)。
+   - 在 AI 执行写文件与代码编辑时自动弹出双栏只读比对窗口，直观呈现 AI 的修改提议，支持“通过审查”与“拒绝修改”双向操作闭环。
    - 纯 Rust 单二进制原生实现，零外部脚本与胶水依赖，全平台（Linux / macOS / Windows）即开即用。
 
 ## 编译与安装 Release 命令行 (`fcompare`)
@@ -43,17 +44,24 @@ FreeCompare 提供了原生的 `fcompare guard` 命令，用作 Antigravity (agy
 
 ### 1. 配置项目的 `.agents/hooks.json`
 
-在任意项目根目录的 `.agents/hooks.json` 中配置守卫：
+在任意项目根目录的 `.agents/hooks.json` 中配置守卫（可将 `"enabled"` 设为 `false` 临时关闭）：
 
 ```json
 {
-  "hooks": {
-    "pre_write_file": {
-      "command": "fcompare guard"
-    },
-    "pre_edit_file": {
-      "command": "fcompare guard"
-    }
+  "fcompare-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "fcompare guard",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
   }
 }
 ```
@@ -72,7 +80,8 @@ FreeCompare 提供了原生的 `fcompare guard` 命令，用作 Antigravity (agy
 ## 快速运行指南
 
 ```bash
-# 1. 运行 Rust 核心引擎与 CLI 全量测试
+# 1. 运行前端单元测试与 Rust 全工作区测试
+npm --prefix ui test
 cargo test --workspace
 
 # 2. 直接通过命令行唤起 UI 窗口对比目录、文件或空白新建会话
