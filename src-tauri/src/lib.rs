@@ -15,8 +15,11 @@ use freecompare_core::{
         apply_folder_item_operation, compare_folders, FolderCompareOptions,
         FolderDiffResult, FolderSyncActionKind,
     },
-    EncodingKind, LineEnding, SessionKind, SessionManager, SessionRecord, StartupLaunchSession,
-    TextBuffer, UserPreferences,
+    is_sftp_uri, list_ssh_config_hosts,
+    sftp::{prime_location_credentials, sftp_list_dir, SftpLocation},
+    test_sftp_connection, vfs, EncodingKind, LineEnding, SessionKind, SessionManager,
+    SessionRecord, SftpConnectOptions, SftpConnectionTestResult, SshHostEntry,
+    StartupLaunchSession, TextBuffer, UserPreferences,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -160,8 +163,8 @@ impl AppBackend {
                 let title = inv.titles[0]
                     .clone()
                     .unwrap_or_else(|| file_name_label(&p0));
-                let is_dir = p0.is_dir()
-                    || inv.forced_viewer == Some(ForcedViewerKind::FolderCompare);
+                let is_dir = inv.forced_viewer == Some(ForcedViewerKind::FolderCompare)
+                    || vfs::is_dir(&left);
                 let kind = if is_dir {
                     SessionKind::FolderCompare
                 } else {
@@ -199,8 +202,8 @@ impl AppBackend {
                     .unwrap_or_else(|| file_name_label(&p1));
                 let title = format!("{left_name} ↔ {right_name}");
 
-                let is_dir = (p0.is_dir() && p1.is_dir())
-                    || inv.forced_viewer == Some(ForcedViewerKind::FolderCompare);
+                let is_dir = inv.forced_viewer == Some(ForcedViewerKind::FolderCompare)
+                    || (vfs::is_dir(&left) && vfs::is_dir(&right));
 
                 if is_dir {
                     self.manager.record_recent(
@@ -341,12 +344,15 @@ impl AppBackend {
         }
         let left = expand_path(&inv.paths[0]);
         let right = expand_path(&inv.paths[1]);
-        if !left.exists() || !right.exists() {
+        let left_str = canonical_or_display(&left);
+        let right_str = canonical_or_display(&right);
+        if !vfs::exists(&left_str) || !vfs::exists(&right_str) {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         }
 
-        if left.is_dir() && right.is_dir() {
-            let Ok(res) = compare_folders(&left, &right, &FolderCompareOptions::default()) else {
+        if vfs::is_dir(&left_str) && vfs::is_dir(&right_str) {
+            let Ok(res) = compare_folders(&left_str, &right_str, &FolderCompareOptions::default())
+            else {
                 return exit_codes::ERROR_OR_MISSING_ARGS;
             };
             if res.stats.modified_items == 0
@@ -359,10 +365,10 @@ impl AppBackend {
         }
 
         let mode = inv.quick_compare.unwrap_or(QuickCompareMode::RulesBased);
-        let Ok(b1) = std::fs::read(&left) else {
+        let Ok(b1) = vfs::read_bytes(&left_str) else {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         };
-        let Ok(b2) = std::fs::read(&right) else {
+        let Ok(b2) = vfs::read_bytes(&right_str) else {
             return exit_codes::ERROR_OR_MISSING_ARGS;
         };
 
@@ -385,7 +391,8 @@ impl AppBackend {
                 if b1 == b2 {
                     return exit_codes::BINARY_SAME;
                 }
-                let Ok(s_exact) = TwoWaySession::from_files(&left, &right, DiffOptions::default())
+                let Ok(s_exact) =
+                    TwoWaySession::from_files(&left_str, &right_str, DiffOptions::default())
                 else {
                     return exit_codes::ERROR_OR_MISSING_ARGS;
                 };
@@ -399,7 +406,9 @@ impl AppBackend {
                     show_only_diffs: false,
                     context_lines: 3,
                 };
-                if let Ok(s_relaxed) = TwoWaySession::from_files(&left, &right, relaxed_opts) {
+                if let Ok(s_relaxed) =
+                    TwoWaySession::from_files(&left_str, &right_str, relaxed_opts)
+                {
                     if s_relaxed.summary().hunks.is_empty() {
                         return exit_codes::UNIMPORTANT_DIFF;
                     }
@@ -429,8 +438,37 @@ impl AppBackend {
         self.manager.update_preferences(prefs)
     }
 
-    /// Lists local directory contents for the cross-platform File/Folder Browser Modal.
+    /// Lists local directory contents or remote `sftp://` directory contents for File/Folder Browser Modal.
     pub fn list_local_dir(&self, dir_path: Option<&str>) -> Result<FsListResponse, String> {
+        self.list_dir_with_options(dir_path, None)
+    }
+
+    pub fn list_dir_with_options(
+        &self,
+        dir_path: Option<&str>,
+        sftp_opts: Option<&SftpConnectOptions>,
+    ) -> Result<FsListResponse, String> {
+        if let Some(raw) = dir_path.map(str::trim).filter(|s| !s.is_empty()) {
+            if is_sftp_uri(raw) {
+                let listing =
+                    sftp_list_dir(raw, sftp_opts).map_err(|e| format!("无法读取 SFTP 目录 {raw}: {e}"))?;
+                return Ok(FsListResponse {
+                    current_dir: listing.current_uri,
+                    parent_dir: listing.parent_uri,
+                    entries: listing
+                        .entries
+                        .into_iter()
+                        .map(|e| FsEntryDto {
+                            name: e.name,
+                            path: e.uri,
+                            is_dir: e.is_dir,
+                            size: e.size,
+                        })
+                        .collect(),
+                });
+            }
+        }
+
         let target = match dir_path.map(|s| s.trim()).filter(|s| !s.is_empty()) {
             Some(p) => expand_path(p),
             None => self
@@ -510,11 +548,13 @@ impl AppBackend {
 
     pub fn read_text_file(&self, path: &str) -> Result<ReadTextFileResponse, String> {
         let expanded = expand_path(path);
+        let raw_str = expanded.to_string_lossy().to_string();
         let buffer = TextBuffer::from_file(&expanded)
-            .map_err(|e| format!("无法读取文件 ({}): {}", expanded.display(), e))?;
+            .map_err(|e| format!("无法读取文件 ({raw_str}): {e}"))?;
+        let display_path = canonical_or_display(&expanded);
         Ok(ReadTextFileResponse {
             content: buffer.full_text(),
-            path: expanded.to_string_lossy().to_string(),
+            path: display_path,
             line_count: buffer.line_count(),
             encoding: buffer.encoding().label().to_string(),
             line_ending: buffer.line_ending().label().to_string(),
@@ -533,25 +573,27 @@ impl AppBackend {
         line_ending: Option<&str>,
     ) -> Result<(), String> {
         let expanded = expand_path(path);
-        if let Some(parent) = expanded.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        let path_str = expanded.to_string_lossy().to_string();
+        if let Ok(loc) = SftpLocation::parse(&path_str) {
+            prime_location_credentials(&loc);
         }
 
-        let existing_format = if expanded.is_file() {
+        let explicit_encoding = encoding.and_then(EncodingKind::from_label_or_name);
+        let explicit_line_ending = line_ending.and_then(LineEnding::from_label_or_name);
+
+        let existing_format = if (explicit_encoding.is_none() || explicit_line_ending.is_none())
+            && vfs::is_file(&path_str)
+        {
             detect_file_format(&expanded).ok()
         } else {
             None
         };
 
-        let target_encoding = encoding
-            .and_then(EncodingKind::from_label_or_name)
+        let target_encoding = explicit_encoding
             .or_else(|| existing_format.map(|(enc, _)| enc))
             .unwrap_or(EncodingKind::Utf8);
 
-        let target_line_ending = line_ending
-            .and_then(LineEnding::from_label_or_name)
+        let target_line_ending = explicit_line_ending
             .or_else(|| existing_format.and_then(|(_, le)| le))
             .or_else(|| detect_line_ending_opt(content))
             .unwrap_or(if cfg!(windows) {
@@ -562,8 +604,19 @@ impl AppBackend {
 
         let formatted = target_line_ending.apply_to(content);
         let bytes = encode_string(&formatted, target_encoding);
-        std::fs::write(&expanded, bytes)
-            .map_err(|e| format!("无法保存文件 ({}): {}", expanded.display(), e))
+        vfs::write_bytes(&path_str, &bytes)
+            .map_err(|e| format!("无法保存文件 ({path_str}): {e}"))
+    }
+
+    pub fn list_ssh_config_hosts(&self) -> Vec<SshHostEntry> {
+        list_ssh_config_hosts()
+    }
+
+    pub fn test_sftp_connection(
+        &self,
+        opts: &SftpConnectOptions,
+    ) -> Result<SftpConnectionTestResult, String> {
+        test_sftp_connection(opts)
     }
 
     pub fn open_two_way_files(
@@ -575,8 +628,8 @@ impl AppBackend {
     ) -> Result<OpenTwoWayResponse, String> {
         let left_expanded = expand_path(left_path);
         let right_expanded = expand_path(right_path);
-        let left_str = left_expanded.to_string_lossy().to_string();
-        let right_str = right_expanded.to_string_lossy().to_string();
+        let left_str = canonical_or_display(&left_expanded);
+        let right_str = canonical_or_display(&right_expanded);
         let session = TwoWaySession::from_files(&left_expanded, &right_expanded, options)
             .map_err(|e| format!("无法读取文件 ({left_str} vs {right_str}): {e}"))?;
         let summary = session.summary();
@@ -773,9 +826,9 @@ impl AppBackend {
             .write()
             .insert(session_id.clone(), session);
 
-        let left_str = left_expanded.to_string_lossy().to_string();
-        let base_str = base_expanded.to_string_lossy().to_string();
-        let right_str = right_expanded.to_string_lossy().to_string();
+        let left_str = canonical_or_display(&left_expanded);
+        let base_str = canonical_or_display(&base_expanded);
+        let right_str = canonical_or_display(&right_expanded);
 
         self.manager.record_recent(
             format!("3-Way: {}", file_name_label(&left_expanded)),
@@ -832,17 +885,19 @@ impl AppBackend {
     ) -> Result<FolderDiffResult, String> {
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
+        let left_display = canonical_or_display(&left_expanded);
+        let right_display = canonical_or_display(&right_expanded);
         let res = compare_folders(&left_expanded, &right_expanded, &options)
-            .map_err(|e| format!("无法扫描目录 ({left_dir} vs {right_dir}): {e}"))?;
+            .map_err(|e| format!("无法扫描目录 ({left_display} vs {right_display}): {e}"))?;
         self.manager.record_recent(
             format!(
                 "{} ↔ {}",
-                file_name_label(Path::new(left_dir)),
-                file_name_label(Path::new(right_dir))
+                file_name_label(&left_expanded),
+                file_name_label(&right_expanded)
             ),
             SessionKind::FolderCompare,
-            left_dir.to_string(),
-            right_dir.to_string(),
+            left_display,
+            right_display,
             None,
             None,
         );
@@ -1027,7 +1082,35 @@ impl AppBackend {
             }
             "list_local_dir" => {
                 let dir_path = args["dir_path"].as_str();
-                let res = self.list_local_dir(dir_path)?;
+                let sftp_opts: Option<SftpConnectOptions> =
+                    if dir_path.is_some_and(is_sftp_uri)
+                        && (args.get("password").is_some()
+                            || args.get("private_key_path").is_some()
+                            || args.get("passphrase").is_some())
+                    {
+                        Some(SftpConnectOptions {
+                            uri: dir_path.map(|s| s.to_string()),
+                            password: args["password"].as_str().map(|s| s.to_string()),
+                            private_key_path: args["private_key_path"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                            passphrase: args["passphrase"].as_str().map(|s| s.to_string()),
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
+                let res = self.list_dir_with_options(dir_path, sftp_opts.as_ref())?;
+                Ok(json!(res))
+            }
+            "list_ssh_config_hosts" => {
+                let hosts = self.list_ssh_config_hosts();
+                Ok(json!({ "hosts": hosts }))
+            }
+            "test_sftp_connection" => {
+                let opts: SftpConnectOptions =
+                    serde_json::from_value(args.clone()).unwrap_or_default();
+                let res = self.test_sftp_connection(&opts)?;
                 Ok(json!(res))
             }
             "read_text_file" => {
@@ -1183,6 +1266,14 @@ impl AppBackend {
 }
 
 fn canonical_or_display(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if is_sftp_uri(&raw) {
+        if let Ok(loc) = SftpLocation::parse(&raw) {
+            prime_location_credentials(&loc);
+            return loc.to_uri();
+        }
+        return raw.trim().to_string();
+    }
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
@@ -1190,7 +1281,13 @@ fn canonical_or_display(path: &Path) -> String {
 }
 
 fn file_name_label(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if is_sftp_uri(&raw) {
+        if let Ok(loc) = SftpLocation::parse(&raw) {
+            return loc.file_name();
+        }
+    }
     path.file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| raw.to_string())
 }

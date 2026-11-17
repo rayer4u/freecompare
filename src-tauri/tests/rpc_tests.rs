@@ -549,3 +549,25 @@ fn test_write_text_file_preserves_encoding_and_line_endings_and_expand_path_rpcs
         .unwrap();
     assert_eq!(fs::read(&out_p).unwrap(), bom_crlf("line1_L\nline2\nline3_R\n"));
 }
+
+#[test]
+fn test_sftp_rpcs_ssh_config_and_validation() {
+    let backend = AppBackend::new();
+
+    // `list_ssh_config_hosts` returns `{ "hosts": [...] }`
+    let hosts_res = backend
+        .dispatch_rpc("list_ssh_config_hosts", &json!({}))
+        .unwrap();
+    assert!(hosts_res["hosts"].is_array());
+
+    // `test_sftp_connection` without host returns descriptive error
+    let missing_host = backend.dispatch_rpc("test_sftp_connection", &json!({}));
+    assert!(missing_host.is_err());
+
+    // `list_local_dir` with invalid `sftp://` URI routes to SFTP and fails cleanly without touching local FS
+    let invalid_sftp = backend.dispatch_rpc(
+        "list_local_dir",
+        &json!({ "dir_path": "sftp://" }),
+    );
+    assert!(invalid_sftp.is_err());
+}

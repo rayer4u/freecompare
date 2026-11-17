@@ -1,7 +1,6 @@
 use encoding_rs::{Encoding, GB18030, UTF_16BE, UTF_16LE, UTF_8};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -127,7 +126,8 @@ impl TextBuffer {
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, BufferError> {
         let path_buf = expand_path(path);
-        let bytes = fs::read(&path_buf)?;
+        let path_str = path_buf.to_string_lossy();
+        let bytes = crate::vfs::read_bytes(&path_str)?;
         let (decoded, encoding) = decode_bytes(&bytes);
         let line_ending = detect_line_ending(&decoded);
         let normalized = normalize_line_endings(&decoded);
@@ -313,9 +313,6 @@ impl TextBuffer {
                 )))
             }
         };
-        if let Some(parent) = out_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
 
         let raw_text = self.rope.to_string();
         let text_with_le = match self.line_ending {
@@ -325,7 +322,7 @@ impl TextBuffer {
         };
 
         let bytes = encode_string(&text_with_le, self.encoding);
-        fs::write(&out_path, bytes)?;
+        crate::vfs::write_bytes(&out_path.to_string_lossy(), &bytes)?;
         self.path = Some(out_path);
         self.dirty = false;
         Ok(())
@@ -423,12 +420,12 @@ pub fn detect_line_ending(text: &str) -> LineEnding {
     })
 }
 
-/// Detects the encoding and optional line ending of an existing file on disk.
+/// Detects the encoding and optional line ending of an existing file on disk or remote SFTP.
 pub fn detect_file_format(
     path: impl AsRef<Path>,
 ) -> Result<(EncodingKind, Option<LineEnding>), BufferError> {
     let path_buf = expand_path(path);
-    let bytes = fs::read(&path_buf)?;
+    let bytes = crate::vfs::read_bytes(&path_buf.to_string_lossy())?;
     let (decoded, encoding) = decode_bytes(&bytes);
     Ok((encoding, detect_line_ending_opt(&decoded)))
 }
@@ -456,12 +453,16 @@ fn join_normalized_rel(base: PathBuf, rel: &str) -> PathBuf {
 }
 
 /// Expands user home directory (e.g. `~/path`, `~`, `$HOME`, `%USERPROFILE%`) and resolves relative paths to absolute paths.
+/// Remote `sftp://` URIs are preserved untouched.
 pub fn expand_path(path: impl AsRef<Path>) -> PathBuf {
     let p = path.as_ref();
     let s = p.to_string_lossy();
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return PathBuf::new();
+    }
+    if crate::sftp::is_sftp_uri(trimmed) {
+        return PathBuf::from(trimmed);
     }
 
     let expanded = if trimmed == "~"

@@ -403,18 +403,13 @@ impl ThreeWaySession {
                 )))
             }
         };
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
         let (encoding, line_ending) = self.effective_encoding_and_line_ending();
         let mut content = self.merged_lines.join(line_ending.as_str());
         if !content.is_empty() {
             content.push_str(line_ending.as_str());
         }
         let bytes = encode_string(&content, encoding);
-        std::fs::write(out_path, bytes)?;
+        crate::vfs::write_bytes(&out_path.to_string_lossy(), &bytes)?;
         Ok(())
     }
 }

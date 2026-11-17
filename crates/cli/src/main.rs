@@ -604,7 +604,11 @@ fn run_cli_summary(inv: &CliInvocation) -> Result<()> {
         2 => {
             let left = &paths[0];
             let right = &paths[1];
-            if left.is_dir() && right.is_dir() {
+            let left_str = left.to_string_lossy();
+            let right_str = right.to_string_lossy();
+            if freecompare_core::vfs::is_dir(&left_str)
+                && freecompare_core::vfs::is_dir(&right_str)
+            {
                 let mut opts = FolderCompareOptions::default();
                 opts.recursive = true;
                 let res = compare_folders(left, right, &opts)?;

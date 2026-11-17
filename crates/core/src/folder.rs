@@ -1,10 +1,9 @@
+use crate::vfs::{self, VfsPath};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,17 +115,17 @@ pub fn compare_folders(
     right_root: impl AsRef<Path>,
     options: &FolderCompareOptions,
 ) -> std::io::Result<FolderDiffResult> {
-    let left_base = left_root.as_ref();
-    let right_base = right_root.as_ref();
+    let left_vfs = VfsPath::parse(&left_root.as_ref().to_string_lossy())?;
+    let right_vfs = VfsPath::parse(&right_root.as_ref().to_string_lossy())?;
     let glob_set = build_exclude_globset(&options.exclude_globs);
 
     let mut entries = Vec::new();
     let mut stats = FolderDiffStats::default();
 
     compare_dir_recursive(
-        left_base,
-        right_base,
-        Path::new(""),
+        &left_vfs,
+        &right_vfs,
+        "",
         0,
         options,
         &glob_set,
@@ -135,8 +134,8 @@ pub fn compare_folders(
     )?;
 
     Ok(FolderDiffResult {
-        left_root: left_base.to_string_lossy().to_string(),
-        right_root: right_base.to_string_lossy().to_string(),
+        left_root: left_vfs.display_string(),
+        right_root: right_vfs.display_string(),
         entries,
         stats,
     })
@@ -148,13 +147,11 @@ pub fn compare_subfolder(
     sub_rel: &str,
     options: &FolderCompareOptions,
 ) -> std::io::Result<FolderSubtreeResult> {
-    let left_base = left_root.as_ref();
-    let right_base = right_root.as_ref();
+    let left_vfs = VfsPath::parse(&left_root.as_ref().to_string_lossy())?;
+    let right_vfs = VfsPath::parse(&right_root.as_ref().to_string_lossy())?;
     let glob_set = build_exclude_globset(&options.exclude_globs);
 
     let clean_rel = sub_rel.trim_matches('/').replace('\\', "/");
-    let rel_path = PathBuf::from(&clean_rel);
-
     let base_depth = clean_rel.split('/').filter(|s| !s.is_empty()).count();
 
     let mut entries = Vec::new();
@@ -167,9 +164,9 @@ pub fn compare_subfolder(
     }
 
     compare_dir_recursive(
-        left_base,
-        right_base,
-        &rel_path,
+        &left_vfs,
+        &right_vfs,
+        &clean_rel,
         base_depth,
         &sub_opts,
         &glob_set,
@@ -178,8 +175,8 @@ pub fn compare_subfolder(
     )?;
 
     let has_diff = entries.iter().any(|e| e.status != FolderItemStatus::Equal);
-    let l_exists = left_base.join(&rel_path).exists();
-    let r_exists = right_base.join(&rel_path).exists();
+    let l_exists = vfs::exists(&left_vfs.join_rel(&clean_rel).display_string());
+    let r_exists = vfs::exists(&right_vfs.join_rel(&clean_rel).display_string());
 
     let status = match (l_exists, r_exists) {
         (true, true) => {
@@ -204,7 +201,7 @@ pub fn compare_subfolder(
 #[derive(Clone)]
 struct LocalMeta {
     name: String,
-    path: PathBuf,
+    path: String,
     is_dir: bool,
     size: u64,
     modified_ms: u64,
@@ -212,9 +209,9 @@ struct LocalMeta {
 
 #[allow(clippy::too_many_arguments)]
 fn compare_dir_recursive(
-    left_root: &Path,
-    right_root: &Path,
-    rel_dir: &Path,
+    left_root: &VfsPath,
+    right_root: &VfsPath,
+    rel_dir: &str,
     depth: usize,
     options: &FolderCompareOptions,
     glob_set: &GlobSet,
@@ -225,11 +222,20 @@ fn compare_dir_recursive(
         return Ok(());
     }
 
-    let left_dir = left_root.join(rel_dir);
-    let right_dir = right_root.join(rel_dir);
+    let left_dir = left_root.join_rel(rel_dir).display_string();
+    let right_dir = right_root.join_rel(rel_dir).display_string();
 
-    let left_map = read_dir_entries(&left_dir, rel_dir, options.ignore_case_names, glob_set);
-    let right_map = read_dir_entries(&right_dir, rel_dir, options.ignore_case_names, glob_set);
+    let (left_map, right_map) = if left_root.is_sftp() || right_root.is_sftp() {
+        rayon::join(
+            || read_dir_entries(&left_dir, rel_dir, options.ignore_case_names, glob_set),
+            || read_dir_entries(&right_dir, rel_dir, options.ignore_case_names, glob_set),
+        )
+    } else {
+        (
+            read_dir_entries(&left_dir, rel_dir, options.ignore_case_names, glob_set),
+            read_dir_entries(&right_dir, rel_dir, options.ignore_case_names, glob_set),
+        )
+    };
 
     let mut all_keys: Vec<String> = left_map
         .keys()
@@ -278,12 +284,11 @@ fn compare_dir_recursive(
             .or_else(|| r_meta.map(|m| m.name.clone()))
             .unwrap_or_else(|| key.clone());
 
-        let child_rel = if rel_dir.as_os_str().is_empty() {
-            PathBuf::from(&display_name)
+        let normalized_rel = if rel_dir.is_empty() {
+            display_name.clone()
         } else {
-            rel_dir.join(&display_name)
+            format!("{}/{}", rel_dir.trim_end_matches('/'), display_name)
         };
-        let normalized_rel = child_rel.to_string_lossy().replace('\\', "/");
 
         let dir_idx = out.len();
         let should_recurse =
@@ -303,7 +308,7 @@ fn compare_dir_recursive(
         };
 
         out.push(FolderEntryDto {
-            relative_path: normalized_rel,
+            relative_path: normalized_rel.clone(),
             name: display_name,
             is_dir: true,
             depth,
@@ -319,7 +324,7 @@ fn compare_dir_recursive(
             compare_dir_recursive(
                 left_root,
                 right_root,
-                &child_rel,
+                &normalized_rel,
                 depth + 1,
                 options,
                 glob_set,
@@ -351,12 +356,11 @@ fn compare_dir_recursive(
                 .or_else(|| r_meta.map(|m| m.name.clone()))
                 .unwrap_or_else(|| key.clone());
 
-            let child_rel = if rel_dir.as_os_str().is_empty() {
-                PathBuf::from(&display_name)
+            let normalized_rel = if rel_dir.is_empty() {
+                display_name.clone()
             } else {
-                rel_dir.join(&display_name)
+                format!("{}/{}", rel_dir.trim_end_matches('/'), display_name)
             };
-            let normalized_rel = child_rel.to_string_lossy().replace('\\', "/");
 
             let status = match (l_meta, r_meta) {
                 (Some(l), Some(r)) => {
@@ -409,52 +413,40 @@ fn compare_dir_recursive(
 }
 
 fn read_dir_entries(
-    dir: &Path,
-    rel_dir: &Path,
+    dir: &str,
+    rel_dir: &str,
     ignore_case: bool,
     glob_set: &GlobSet,
 ) -> BTreeMap<String, LocalMeta> {
     let mut map = BTreeMap::new();
-    let Ok(rd) = fs::read_dir(dir) else {
+    let Ok(entries) = vfs::read_dir(dir) else {
         return map;
     };
 
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let rel_path = if rel_dir.as_os_str().is_empty() {
-            PathBuf::from(&name)
+    for entry in entries {
+        let rel_path = if rel_dir.is_empty() {
+            entry.name.clone()
         } else {
-            rel_dir.join(&name)
+            format!("{}/{}", rel_dir.trim_end_matches('/'), entry.name)
         };
-        if glob_set.is_match(&name) || glob_set.is_match(&rel_path) {
+        if glob_set.is_match(&entry.name) || glob_set.is_match(&rel_path) {
             continue;
         }
-        // Use `fs::metadata` on `entry.path()` rather than `entry.metadata()` so that
-        // symlinks created by `git difftool --dir-diff` are followed properly!
-        let Ok(meta) = fs::metadata(entry.path()).or_else(|_| entry.metadata()) else {
-            continue;
-        };
-        let modified_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
 
         let key = if ignore_case {
-            name.to_lowercase()
+            entry.name.to_lowercase()
         } else {
-            name.clone()
+            entry.name.clone()
         };
 
         map.insert(
             key,
             LocalMeta {
-                name,
-                path: entry.path(),
-                is_dir: meta.is_dir(),
-                size: if meta.is_file() { meta.len() } else { 0 },
-                modified_ms,
+                name: entry.name,
+                path: entry.full_path,
+                is_dir: entry.is_dir,
+                size: entry.size,
+                modified_ms: entry.modified_ms,
             },
         );
     }
@@ -463,10 +455,10 @@ fn read_dir_entries(
 }
 
 fn files_equal(
-    left_path: &Path,
+    left_path: &str,
     left_size: u64,
     left_mtime: u64,
-    right_path: &Path,
+    right_path: &str,
     right_size: u64,
     right_mtime: u64,
     mode: FolderCompareMode,
@@ -477,17 +469,10 @@ fn files_equal(
     if mode == FolderCompareMode::FastMetadata {
         return left_mtime.abs_diff(right_mtime) < 2000;
     }
-    match rayon::join(|| hash_file(left_path), || hash_file(right_path)) {
+    match rayon::join(|| vfs::hash_file_blake3(left_path), || vfs::hash_file_blake3(right_path)) {
         (Ok(h1), Ok(h2)) => h1 == h2,
         _ => false,
     }
-}
-
-fn hash_file(path: &Path) -> std::io::Result<blake3::Hash> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(hasher.finalize())
 }
 
 fn build_exclude_globset(patterns: &[String]) -> GlobSet {
@@ -500,49 +485,22 @@ fn build_exclude_globset(patterns: &[String]) -> GlobSet {
     builder.build().unwrap_or_else(|_| GlobSet::empty())
 }
 
-/// Copies or deletes an entry between left and right folder roots.
+/// Copies or deletes an entry between left and right folder roots (supports Local and SFTP).
 pub fn apply_folder_item_operation(
     left_root: &Path,
     right_root: &Path,
     relative_path: &str,
     action: FolderSyncActionKind,
 ) -> std::io::Result<()> {
-    let rel = Path::new(relative_path);
-    let left_target = left_root.join(rel);
-    let right_target = right_root.join(rel);
+    let left_vfs = VfsPath::parse(&left_root.to_string_lossy())?;
+    let right_vfs = VfsPath::parse(&right_root.to_string_lossy())?;
+    let left_target = left_vfs.join_rel(relative_path).display_string();
+    let right_target = right_vfs.join_rel(relative_path).display_string();
 
     match action {
-        FolderSyncActionKind::CopyLeftToRight => copy_path_recursive(&left_target, &right_target),
-        FolderSyncActionKind::CopyRightToLeft => copy_path_recursive(&right_target, &left_target),
-        FolderSyncActionKind::DeleteLeft => remove_path_any(&left_target),
-        FolderSyncActionKind::DeleteRight => remove_path_any(&right_target),
-    }
-}
-
-fn copy_path_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let meta = fs::metadata(src)?;
-    if meta.is_dir() {
-        fs::create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_path_recursive(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-    } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dst)?;
-    }
-    Ok(())
-}
-
-fn remove_path_any(target: &Path) -> std::io::Result<()> {
-    if !target.exists() {
-        return Ok(());
-    }
-    if target.is_dir() {
-        fs::remove_dir_all(target)
-    } else {
-        fs::remove_file(target)
+        FolderSyncActionKind::CopyLeftToRight => vfs::copy_recursive(&left_target, &right_target),
+        FolderSyncActionKind::CopyRightToLeft => vfs::copy_recursive(&right_target, &left_target),
+        FolderSyncActionKind::DeleteLeft => vfs::remove_any(&left_target),
+        FolderSyncActionKind::DeleteRight => vfs::remove_any(&right_target),
     }
 }
