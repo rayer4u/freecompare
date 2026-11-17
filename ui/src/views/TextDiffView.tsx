@@ -12,6 +12,11 @@ import { VirtualDiffViewport } from "../engine/VirtualDiffViewport";
 import { t } from "../i18n";
 import { computeNextHunkIndex } from "../utils/preferences";
 import {
+  displayPathBaseName,
+  isSftpUri,
+  maskSftpPassword,
+} from "../utils/sftp";
+import {
   findFirstMatchFromRow,
   findLastMatchBeforeRow,
   type SearchScope,
@@ -531,7 +536,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         });
         if (res?.saved) {
           setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
-          showToast(`已保存到磁盘文件: ${path}`);
+          showToast(`已保存到磁盘文件: ${maskSftpPassword(path)}`);
           return;
         }
       } catch (err) {
@@ -587,7 +592,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         );
         setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
         setVersionTick((t) => t + 1);
-        showToast(`已加载文件: ${res.path} (${res.line_count} 行, ${res.encoding})`);
+        showToast(`已加载文件: ${maskSftpPassword(res.path)} (${res.line_count} 行, ${res.encoding})`);
       } else {
         showToast(`无法读取本地文件: ${trimmed}`);
       }
@@ -638,19 +643,21 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             initial.rows.find((row) => row.status !== "equal") ?? initial.rows[0];
           if (firstDiff) setSelectedRow(firstDiff);
         }
-        const lBase = l ? l.split(/[/\\]/).pop() || l : "";
-        const rBase = r ? r.split(/[/\\]/).pop() || r : "";
-        const shortTitle =
+        const lBase = displayPathBaseName(l);
+        const rBase = displayPathBaseName(r);
+        const remotePrefix = isSftpUri(l) || isSftpUri(r) ? "🌐 " : "";
+        const baseTitle =
           lBase === rBase
             ? lBase
             : lBase && rBase
             ? `${lBase} ↔ ${rBase}`
             : lBase || rBase;
+        const shortTitle = baseTitle ? `${remotePrefix}${baseTitle}` : "";
         if (shortTitle && shortTitle !== lastReportedTitle && !props.leftTitle && !props.rightTitle) {
           lastReportedTitle = shortTitle;
           props.onUpdateTabTitle?.(shortTitle);
         }
-        showToast(`已加载对比文件: ${l} ↔ ${r}`);
+        showToast(`已加载对比文件: ${maskSftpPassword(l)} ↔ ${maskSftpPassword(r)}`);
       }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err));
@@ -1213,6 +1220,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <Show when={props.leftReadonly}>
             <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
           </Show>
+          <Show when={isSftpUri(leftPath())}>
+            <span class="meta-tag sftp-tag">{t("text_diff.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             list={`mru-left-${props.sessionId}`}
@@ -1253,6 +1263,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           </span>
           <Show when={props.rightReadonly}>
             <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
+          </Show>
+          <Show when={isSftpUri(rightPath())}>
+            <span class="meta-tag sftp-tag">{t("text_diff.sftp_badge")}</span>
           </Show>
           <input
             class="path-text-input"

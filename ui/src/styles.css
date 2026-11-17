@@ -1686,6 +1686,146 @@ body {
   padding: 6px 14px;
 }
 
+.modal-success-banner {
+  background: rgba(34, 197, 94, 0.16);
+  color: #4ade80;
+  font-size: 12px;
+  padding: 6px 14px;
+}
+
+.modal-mode-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sftp-panel {
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sftp-ssh-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sftp-section-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.sftp-host-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 76px;
+  overflow-y: auto;
+}
+
+.sftp-host-chip {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sftp-host-chip:hover,
+.sftp-host-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sftp-host-chip-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.sftp-form-grid {
+  display: grid;
+  grid-template-columns: 2fr 80px 1.2fr 1.5fr;
+  gap: 8px;
+}
+
+.sftp-auth-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1fr;
+  gap: 8px;
+}
+
+.sftp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sftp-field label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.sftp-input {
+  border: 1px solid var(--border-color);
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.sftp-input:focus {
+  border-color: var(--accent);
+}
+
+.sftp-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sftp-auth-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sftp-tag {
+  background: rgba(56, 189, 248, 0.16);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.sftp-hint-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 14px;
+  background: rgba(56, 189, 248, 0.1);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.28);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
 .modal-file-list {
   flex: 1;
   overflow-y: auto;

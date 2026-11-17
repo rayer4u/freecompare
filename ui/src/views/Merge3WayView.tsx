@@ -16,6 +16,7 @@ import {
 } from "../types";
 import { t } from "../i18n";
 import { computeThreeWayNavTarget } from "../utils/preferences";
+import { displayPathBaseName, isSftpUri } from "../utils/sftp";
 
 const THREE_WAY_ROW_HEIGHT = 24;
 
@@ -157,9 +158,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           setTimeout(() => scrollToHunk(firstConflict), 0);
         }
         const fileBase =
-          bp.split(/[/\\]/).pop() ||
-          lp.split(/[/\\]/).pop() ||
-          rp.split(/[/\\]/).pop();
+          displayPathBaseName(bp) ||
+          displayPathBaseName(lp) ||
+          displayPathBaseName(rp);
         if (fileBase && fileBase !== lastReportedTitle) {
           lastReportedTitle = fileBase;
           props.onUpdateTabTitle?.(`⑃ ${fileBase}`);
@@ -494,6 +495,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
       >
         <div class="path-input-box">
           <span class="side-badge left">LEFT</span>
+          <Show when={isSftpUri(leftPath())}>
+            <span class="meta-tag sftp-tag">{t("merge_3way.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             placeholder={t("merge_3way.pick_left")}
@@ -520,6 +524,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
 
         <div class="path-input-box">
           <span class="side-badge">BASE</span>
+          <Show when={isSftpUri(basePath())}>
+            <span class="meta-tag sftp-tag">{t("merge_3way.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             placeholder={t("merge_3way.pick_base")}
@@ -546,6 +553,9 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
 
         <div class="path-input-box">
           <span class="side-badge right">RIGHT</span>
+          <Show when={isSftpUri(rightPath())}>
+            <span class="meta-tag sftp-tag">{t("merge_3way.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             placeholder={t("merge_3way.pick_right")}
@@ -722,6 +732,13 @@ export const Merge3WayView: Component<Merge3WayViewProps> = (props) => {
           <FileBrowserModal
             mode="file"
             title={`选择 ${target().toUpperCase()} 文件`}
+            initialPath={
+              target() === "left"
+                ? leftPath()
+                : target() === "base"
+                ? basePath()
+                : rightPath()
+            }
             onClose={() => setPickerTarget(null)}
             onSelect={(p) => {
               const t = target();

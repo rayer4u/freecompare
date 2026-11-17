@@ -9,6 +9,11 @@ import { FileBrowserModal } from "../components/FileBrowserModal";
 import { t } from "../i18n";
 import { mergeFolderExcludeGlobs } from "../utils/preferences";
 import {
+  displayPathBaseName,
+  isSftpUri,
+  joinComparePath,
+} from "../utils/sftp";
+import {
   FolderDiffResult,
   FolderEntryDto,
   FolderItemStatus,
@@ -71,6 +76,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [recentFolders, setRecentFolders] = createSignal<string[]>([]);
   const [toast, setToast] = createSignal<string | null>(null);
   let lastReportedTitle = "";
+  let lastScannedLeft = "";
+  let lastScannedRight = "";
+  let sftpHintShown = false;
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -96,10 +104,16 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         },
       });
       if (res) {
+        lastScannedLeft = l;
+        lastScannedRight = r;
         setFolderData(res);
         setScannedDirs(new Set<string>());
         setLeftInput(res.left_root);
         setRightInput(res.right_root);
+        if ((isSftpUri(res.left_root) || isSftpUri(res.right_root)) && compareMode() === "hash" && !sftpHintShown) {
+          sftpHintShown = true;
+          notify(t("folder_diff.sftp_fast_hint"));
+        }
         // By default: collapse all subfolders so only the current level is shown initially!
         if (!props.expandAll && !recursive) {
           const dirs = res.entries.filter((e) => e.is_dir).map((e) => e.relative_path);
@@ -126,16 +140,16 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           setSelectedLeftRelPath(null);
           setSelectedRightRelPath(null);
         }
-        const lClean = res.left_root.replace(/[/\\]+$/, "");
-        const rClean = res.right_root.replace(/[/\\]+$/, "");
-        const lBase = lClean ? lClean.split(/[/\\]/).pop() || lClean : "";
-        const rBase = rClean ? rClean.split(/[/\\]/).pop() || rClean : "";
-        const folderTitle =
+        const lBase = displayPathBaseName(res.left_root);
+        const rBase = displayPathBaseName(res.right_root);
+        const remotePrefix = isSftpUri(res.left_root) || isSftpUri(res.right_root) ? "🌐 " : "";
+        const baseTitle =
           lBase === rBase
             ? lBase
             : lBase && rBase
             ? `${lBase} ↔ ${rBase}`
             : lBase || rBase;
+        const folderTitle = baseTitle ? `${remotePrefix}${baseTitle}` : "";
         if (folderTitle && folderTitle !== lastReportedTitle) {
           lastReportedTitle = folderTitle;
           props.onUpdateTabTitle?.(`📁 ${folderTitle}`);
@@ -143,8 +157,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       } else {
         notify(t("folder_diff.err_scan"));
       }
-    } catch {
-      notify(t("folder_diff.err_scan"));
+    } catch (err) {
+      notify(err instanceof Error && err.message ? err.message : t("folder_diff.err_scan"));
     }
   };
 
@@ -230,28 +244,28 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const buildSiblingDiffFiles = (): SiblingDiffFileItem[] => {
-    const lRoot = folderData().left_root.replace(/\/$/, "");
-    const rRoot = folderData().right_root.replace(/\/$/, "");
+    const lRoot = folderData().left_root;
+    const rRoot = folderData().right_root;
     return visibleEntries()
       .filter((e) => !e.is_dir)
       .map((e) => ({
         relativePath: e.relative_path,
         leftFullPath:
-          e.status === "right_only" ? "" : `${lRoot}/${e.relative_path}`,
+          e.status === "right_only" ? "" : joinComparePath(lRoot, e.relative_path),
         rightFullPath:
-          e.status === "left_only" ? "" : `${rRoot}/${e.relative_path}`,
+          e.status === "left_only" ? "" : joinComparePath(rRoot, e.relative_path),
         status: e.status,
       }));
   };
 
   const openEntry = (entry: FolderEntryDto) => {
     if (!entry.is_dir) {
-      const lRoot = folderData().left_root.replace(/\/$/, "");
-      const rRoot = folderData().right_root.replace(/\/$/, "");
+      const lRoot = folderData().left_root;
+      const rRoot = folderData().right_root;
       const leftFullPath =
-        entry.status === "right_only" ? "" : `${lRoot}/${entry.relative_path}`;
+        entry.status === "right_only" ? "" : joinComparePath(lRoot, entry.relative_path);
       const rightFullPath =
-        entry.status === "left_only" ? "" : `${rRoot}/${entry.relative_path}`;
+        entry.status === "left_only" ? "" : joinComparePath(rRoot, entry.relative_path);
       props.onOpenFileDiff(
         leftFullPath,
         rightFullPath,
@@ -275,11 +289,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       return;
     }
 
-    const lRoot = folderData().left_root.replace(/[/\\]+$/, "");
-    const rRoot = folderData().right_root.replace(/[/\\]+$/, "");
+    const lRoot = folderData().left_root;
+    const rRoot = folderData().right_root;
 
-    const leftFullPath = lRel ? `${lRoot}/${lRel}` : "";
-    const rightFullPath = rRel ? `${rRoot}/${rRel}` : "";
+    const leftFullPath = lRel ? joinComparePath(lRoot, lRel) : "";
+    const rightFullPath = rRel ? joinComparePath(rRoot, rRel) : "";
 
     const lName = lRel ? lRel.split("/").pop() ?? lRel : "";
     const rName = rRel ? rRel.split("/").pop() ?? rRel : "";
@@ -858,6 +872,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       <div class="dual-path-bar">
         <div class="path-input-box">
           <span class="side-badge left">LEFT DIR</span>
+          <Show when={isSftpUri(leftInput())}>
+            <span class="meta-tag sftp-tag">{t("folder_diff.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             list="mru-folder-paths"
@@ -868,8 +885,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               e.key === "Enter" && scanRealFolders(leftInput(), rightInput())
             }
             onBlur={() => {
-              if (leftInput().trim() && rightInput().trim()) {
-                scanRealFolders(leftInput(), rightInput());
+              const l = leftInput().trim();
+              const r = rightInput().trim();
+              if (l && r && (l !== lastScannedLeft || r !== lastScannedRight)) {
+                scanRealFolders(l, r);
               }
             }}
           />
@@ -883,6 +902,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         </div>
         <div class="path-input-box">
           <span class="side-badge right">RIGHT DIR</span>
+          <Show when={isSftpUri(rightInput())}>
+            <span class="meta-tag sftp-tag">{t("folder_diff.sftp_badge")}</span>
+          </Show>
           <input
             class="path-text-input"
             list="mru-folder-paths"
@@ -893,8 +915,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               e.key === "Enter" && scanRealFolders(leftInput(), rightInput())
             }
             onBlur={() => {
-              if (leftInput().trim() && rightInput().trim()) {
-                scanRealFolders(leftInput(), rightInput());
+              const l = leftInput().trim();
+              const r = rightInput().trim();
+              if (l && r && (l !== lastScannedLeft || r !== lastScannedRight)) {
+                scanRealFolders(l, r);
               }
             }}
           />
@@ -910,6 +934,26 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           </button>
         </div>
       </div>
+
+      <Show when={(isSftpUri(leftInput()) || isSftpUri(rightInput())) && compareMode() === "hash"}>
+        <div class="sftp-hint-bar">
+          <span>{t("folder_diff.sftp_fast_hint")}</span>
+          <button
+            class="bc-tool-btn"
+            onClick={() => {
+              setCompareMode("fast");
+              callRustRpc("update_user_preferences", {
+                folder_compare_mode: "fast",
+              }).catch(() => {});
+              if (leftInput().trim() && rightInput().trim()) {
+                scanRealFolders(leftInput(), rightInput());
+              }
+            }}
+          >
+            {t("folder_diff.sftp_switch_fast")}
+          </button>
+        </div>
+      </Show>
 
       {/* Cross-file Compare Action Bar */}
       <Show when={selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
@@ -995,11 +1039,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                   onOpenFolderDiff={
                     entry.is_dir && props.onOpenFolderDiff
                       ? () => {
-                          const lRoot = folderData().left_root.replace(/\/$/, "");
-                          const rRoot = folderData().right_root.replace(/\/$/, "");
                           props.onOpenFolderDiff?.(
-                            `${lRoot}/${entry.relative_path}`,
-                            `${rRoot}/${entry.relative_path}`,
+                            joinComparePath(folderData().left_root, entry.relative_path),
+                            joinComparePath(folderData().right_root, entry.relative_path),
                             entry.relative_path
                           );
                         }
@@ -1054,13 +1096,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 <div
                   class="ctx-item"
                   onClick={() => {
-                    const lRoot = folderData().left_root.replace(/\/$/, "");
-                    const rRoot = folderData().right_root.replace(/\/$/, "");
                     const rel = menu().entry.relative_path;
                     setContextMenu(null);
                     props.onOpenFolderDiff?.(
-                      `${lRoot}/${rel}`,
-                      `${rRoot}/${rel}`,
+                      joinComparePath(folderData().left_root, rel),
+                      joinComparePath(folderData().right_root, rel),
                       rel
                     );
                   }}
