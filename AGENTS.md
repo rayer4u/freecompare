@@ -1,83 +1,80 @@
-# FreeCompare 开发与 Agent 协作规范 (AGENTS.md)
+# FreeCompare 工程规范与 Agent 实战手册 (AGENTS.md)
 
-本文件定义了 Agent 在参与 FreeCompare 项目架构设计、代码编写与功能演进时必须严格遵守的架构原则、防坑准则与工程规范，避免后续方案出现考虑不全或平台断层。
-
----
-
-## 1. 跨平台第一原则 (Cross-Platform First)
-
-FreeCompare 的核心定位是全平台（Linux、macOS、Windows）单二进制原生工具，严禁做出单平台偏向假设：
-
-1. **零外部胶水依赖**：
-   - 严禁引入外部系统脚本或未打包的第三方 CLI 依赖（如 `bash`、`zsh`、`jq`、`cmp`、`mktemp`、`python3` 等）。
-   - 所有逻辑（包括数据解析、临时文件生成、比对计算、AI 拦截守卫等）必须使用纯 Rust 或前端 TypeScript 自身完整闭环实现。
-2. **命令与钩子统一**：
-   - 任何面向 Antigravity (agy) 或外部系统的集成，必须封装为 `fcompare <subcommand>`（如 `fcompare guard`），禁止在 hooks 中直接调用 `.sh` 或 `.bat`。
-3. **路径归一化 (`expand_path`)**：
-   - 所有的磁盘文件与目录读取，底层必须经由 `expand_path` 处理，同时兼容 Unix `$HOME` 与 Windows `%USERPROFILE%`，支持 `~` 家目录缩写展开，以及 `\` / `/` 斜杠路径规整。
+本文件面向参与 FreeCompare 开发的 Agent，聚焦**架构边界、标准命令、实战防坑与硬性红线**。
 
 ---
 
-## 2. 数据层与视图滤镜解耦原则 (Data vs. View Decoupling)
+## 1. 仓库地图与职责边界
 
-严禁在获取原始文件内容时借道包含 UI 过滤器的逻辑：
-
-1. **独立读文件 RPC**：
-   - 单侧或双侧加载文件内容必须走专用的 `read_text_file` 接口，严禁借用 `open_two_way_files` 自比来提取行内容。
-2. **严防滤镜置空 Bug**：
-   - 当用户在 UI 开启了“≠ 仅差异”(`show_only_diffs: true`) 时，比对引擎会过滤掉所有相同行；底层加载文件绝对不可受此状态污染，必须保证完整大文件（哪怕上万行）全量保真载入。
-
----
-
-## 3. 交互与状态控制闭环原则 (Interaction Completeness)
-
-所有面向用户的审查、对比与合并操作，必须遵循双向完备性与明确的状态码退出规范：
-
-1. **审查操作双向闭环**：
-   - 任何审查或确认界面必须提供对称的操作通道，不仅有“通过/保存”，必须有显式的“拒绝/放弃”操作（如 UI 上的 `✅ 通过审查` 与 `❌ 拒绝修改`）。
-2. **退出码 (Exit Code) 契约**：
-   - `Exit Code 0`：明确表示审查通过、合并完成且已保存、或操作无误放行；
-   - `Exit Code != 0` (如 `1`)：明确表示用户取消、中断或拒绝变更。
-3. **快捷键对称与防呆**：
-   - 支持键盘快捷操作（如 `Esc` 通过并退出，`Shift + Esc` 拒绝并退出）；
-   - 路径与文本输入框除了监听敲击回车（`Enter`），必须同时监听失焦（`onBlur`），避免用户鼠标点击切换后因未敲回车导致内容不生效。
+| 路径 | 职责 |
+| :--- | :--- |
+| `crates/core` | 纯 Rust 核心引擎：`buffer.rs`（Rope + 编码/换行符 + `expand_path`）、`diff/`（双向/三向算法）、`folder.rs`（目录比对与同步）、`cli_args.rs`（BC/Git 参数兼容）。 |
+| `src-tauri/src/lib.rs` | 统一后端 `AppBackend` 与 `dispatch_rpc` 调度器，Tauri 桌面端与 CLI HTTP 服务共用同一套 RPC 接口。 |
+| `crates/cli` | `fcompare` 单二进制入口：`build.rs` 编译期嵌入 `ui/dist`；`main.rs` 提供 HTTP+SSE 服务、浏览器 App 窗口拉起、`--install-git`、`-qc` 及 `guard` 子命令。 |
+| `ui/src/` | SolidJS + TypeScript 前端：`App.tsx`（标签页/全局快捷键/窗口几何）、`bridge.ts`（RPC 与本地 Diff 客户端）、`engine/VirtualDiffViewport.tsx`、`views/`（文本/目录/三向视图）。 |
 
 ---
 
-## 4. 单二进制自包含分发 (Self-Contained Distribution)
+## 2. 标准验证与本地更新命令
 
-1. **构建内嵌机制**：
-   - 前端资源编译产物（`ui/dist`）必须在编译期通过 `crates/cli/build.rs` 嵌入二进制，保证产物拷贝即可运行。
-2. **联动构建纪律**：
-   - 一旦修改了 `ui/src/` 中的代码，在测试或发布前必须先执行 `npm --prefix ui run build`，再运行 `cargo check` / `cargo test`。
+修改 `ui/src/` 后**必须先构建前端再编译/测试 Rust**（否则二进制内嵌的是旧版 `ui/dist`）：
+
+```bash
+# 1. 前端单元测试（依赖 Node 22+ --experimental-strip-types）与构建
+npm --prefix ui test
+npm --prefix ui run build
+
+# 2. Rust 全工作区测试（core + rpc + cli e2e）
+cargo test --workspace
+
+# 3. 覆盖更新本机安装的 fcompare（需要让系统生效时执行）
+cargo install --path crates/cli --force
+```
+
+> **提示**：`node --test` 仅验证纯函数与 mock DOM；凡涉及 `App.tsx`、视图挂载或 `createEffect` 的改动，必须用无头浏览器（如 `fcompare --no-open-window` + Chromium）或真实窗口确认零运行时异常。
 
 ---
 
-## 5. 审查守卫与安全隔离边界 (Guard & Safety Sandbox)
+## 3. 跨平台与单二进制硬红线
 
-1. **内部系统文件自动放行**：
-   - 审查拦截必须对 `.git/`、`.agents/`、`.gemini/`、`.system_generated/`、临时日志目录设置强制放行白名单，严防守卫修改自身配置时引发递归死锁。
-2. **标准流纯净性**：
-   - `fcompare guard` 等协议子命令的标准输出 (`stdout`) 必须仅包含机器可解析的标准 JSON 响应，所有提示、UI 启动信息与排错日志必须全部重定向到 `stderr`。
+1. **零外部胶水与 C 库依赖**：
+   - 严禁依赖 `bash`、`zsh`、`jq`、`cmp`、`python3`、`.sh`/`.bat` 脚本，或系统级 C 动态库（如 `libssh2`、`openssl`）；所有能力必须使用纯 Rust 或前端 TS 闭环实现。
+2. **路径与 URI 边界**：
+   - 本地磁盘路径必须经过 `expand_path`（兼容 `~`、`$HOME`、`%USERPROFILE%` 及 `\`/`/`）。
+   - 远程 URI（如 `sftp://...`）必须原样保留并走 VFS 分发，严禁被本地 `expand_path` 改写破坏。
+3. **单一自包含分发**：
+   - 所有前端产物通过 `crates/cli/build.rs` 内嵌进单二进制，Release 压缩包不额外附带散落的 `ui/dist`。
 
 ---
 
-## 6. Git 提交身份规范 (Git Commit Identity)
+## 4. 实战防坑清单（高频回归红线）
 
-当用户要求 Agent（AI）代为执行 Git 提交时，必须严格遵守以下身份隔离规范：
+1. **SolidJS `createEffect` 防自循环**：
+   - 在 `createEffect` 中调用会同时读取并写回 Signal（如 `options()`、`rowFilter()`、`excludeGlobs()`）的函数时，**必须使用 `untrack(() => ...)` 包裹**，否则会触发 `RangeError: Maximum call stack size exceeded`，导致页面停在 Home 页且全局快捷键失效。
+2. **键盘 `Esc` / `Shift+Esc` 分层契约**：
+   - 模态框与下拉菜单在 `document` **捕获阶段**消费 `Escape`；
+   - 子视图（`TextDiffView` / `FolderDiffView` / `Merge3WayView`）仅消费无 `Shift` 的 `Escape` 关闭内部弹层，**遇到 `e.shiftKey` 必须放行**给 `App.tsx` 的 `window` 全局监听执行拒绝/退出（`Exit Code 1`）。
+3. **数据与视图解耦 & 格式保真**：
+   - 读文件必须走独立 `read_text_file` 接口，禁止借道 `open_two_way_files`（避免被 `show_only_diffs` 滤镜置空），且禁止使用 `.catch()` 静默吞掉读文件错误。
+   - 读写与保存必须完整保留原文件编码（`UTF-8` / `UTF-8 BOM` / `UTF-16 LE/BE` / `GB18030`）与换行符（`LF` / `CRLF` / `CR`）。
+4. **输入框防呆与退出码闭环**：
+   - 路径与配置输入框须同时监听 `Enter` 与 `onBlur`（仅值变更时触发）。
+   - 审查/合并视图须提供对称的通过（`Exit Code 0`）与拒绝/取消（`Exit Code != 0`）通道。
 
-1. **AI 提交者专属身份**：
-   - 所有代表 AI 进行的 Git 提交，Author 必须严格指定为：
-     ```text
-     Name: Antigravity
-     Email: antigravity@ai.invalid
-     ```
-2. **防撞车与防误关联红线**：
-   - **严禁**使用 `antigravity@google.com`（会被 GitHub 错误关联至非本人的外部自然人账号）。
-   - **严禁**使用 `*@users.noreply.github.com`（会撞车 GitHub 现存同名注册用户的系统隐私邮箱）。
-   - 必须使用 RFC 2606 保留的 `.invalid` 无效顶级域名，确保 GitHub 仅作纯文本显示，物理杜绝关联至任何外部第三方个人主页。
-3. **提交命令规范**：
+---
+
+## 5. AI 审查守卫 (`fcompare guard`) 边界
+
+- **白名单防死锁**：必须自动放行 `.git/`、`.agents/`、`.gemini/`、`.system_generated/` 及系统临时目录（`std::env::temp_dir()`）。
+- **标准流纯净**：`stdout` 仅输出机器可解析的 JSON（如 `{"decision":"allow"}`），一切日志与提示必须输出到 `stderr`。
+
+---
+
+## 6. Git 提交规范
+
+当用户要求 AI 执行 Git 提交时，必须严格遵守：
+1. **Author 隔离**（严禁使用 `@google.com` 或 `*@users.noreply.github.com`）：
    ```bash
-   git commit --author="Antigravity <antigravity@ai.invalid>" -m "<type>: <description>"
+   git commit --author="Antigravity <antigravity@ai.invalid>" -m "<type>: <中文描述>"
    ```
-
+2. **语言与风格**：`<type>` 保留英文（`feat` / `fix` / `docs` / `chore`），正文与描述**必须使用中文**、简洁纯文本；除非用户要求，提交信息中不带版本号。
