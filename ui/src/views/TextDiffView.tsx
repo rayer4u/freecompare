@@ -1727,114 +1727,104 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <Show when={hunk()}>
                 {(h) => (
                   <>
-                    <div
-                      class="ctx-item"
-                      onClick={() => {
-                        dismissMenus();
-                        handleMergeHunk(h().id, "left_to_right");
-                      }}
-                    >
-                      <span>{t("text_diff.copy_to_right")}</span>
-                      <span class="ctx-shortcut">Alt+→</span>
-                    </div>
-                    <div
-                      class="ctx-item"
-                      onClick={() => {
-                        dismissMenus();
-                        handleMergeHunk(h().id, "right_to_left");
-                      }}
-                    >
-                      <span>{t("text_diff.copy_to_left")}</span>
-                      <span class="ctx-shortcut">Alt+←</span>
-                    </div>
+                    <Show when={!props.rightReadonly}>
+                      <div
+                        class="ctx-item"
+                        onClick={() => {
+                          dismissMenus();
+                          handleMergeHunk(h().id, "left_to_right");
+                        }}
+                      >
+                        <span>{t("text_diff.copy_to_right")}</span>
+                        <span class="ctx-shortcut">Alt+→</span>
+                      </div>
+                    </Show>
+                    <Show when={!props.leftReadonly}>
+                      <div
+                        class="ctx-item"
+                        onClick={() => {
+                          dismissMenus();
+                          handleMergeHunk(h().id, "right_to_left");
+                        }}
+                      >
+                        <span>{t("text_diff.copy_to_left")}</span>
+                        <span class="ctx-shortcut">Alt+←</span>
+                      </div>
+                    </Show>
                     <div class="ctx-divider" />
                   </>
                 )}
               </Show>
 
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  const targetSide = side();
-                  setFullEditDraft(
-                    CompareBackendClient.getSideFullText(props.sessionId, targetSide === "left")
-                  );
-                  setEditingFullSide(targetSide);
-                }}
-              >
-                <span>{t("text_diff.ctx_edit_side")}</span>
-              </div>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  handleUndo(isLeft());
-                }}
-              >
-                <span>{t("text_diff.undo")}</span>
-                <span class="ctx-shortcut">Ctrl+Z</span>
-              </div>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  handleRedo(isLeft());
-                }}
-              >
-                <span>{t("text_diff.redo")}</span>
-                <span class="ctx-shortcut">Ctrl+Y</span>
-              </div>
+              <Show when={!(isLeft() ? props.leftReadonly : props.rightReadonly)}>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    const targetSide = side();
+                    setFullEditDraft(
+                      CompareBackendClient.getSideFullText(props.sessionId, targetSide === "left")
+                    );
+                    setEditingFullSide(targetSide);
+                  }}
+                >
+                  <span>{t("text_diff.ctx_edit_side")}</span>
+                </div>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    handleUndo(isLeft());
+                  }}
+                >
+                  <span>{t("text_diff.undo")}</span>
+                  <span class="ctx-shortcut">Ctrl+Z</span>
+                </div>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    handleRedo(isLeft());
+                  }}
+                >
+                  <span>{t("text_diff.redo")}</span>
+                  <span class="ctx-shortcut">Ctrl+Y</span>
+                </div>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    handleSaveSide(isLeft());
+                  }}
+                >
+                  <span>{t("text_diff.save")}</span>
+                  <span class="ctx-shortcut">Ctrl+S</span>
+                </div>
+                <div class="ctx-divider" />
+              </Show>
 
-              <div class="ctx-divider" />
-
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  handleSaveSide(isLeft());
-                }}
+              <Show
+                when={
+                  menu().row &&
+                  (isLeft() ? menu().row!.left_text !== null : menu().row!.right_text !== null)
+                }
               >
-                <span>{t("text_diff.save")}</span>
-                <span class="ctx-shortcut">Ctrl+S</span>
-              </div>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  handleSwapSides();
-                }}
-              >
-                <span>{t("text_diff.swap_sides")}</span>
-              </div>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  handleReload();
-                }}
-              >
-                <span>{t("text_diff.reload")}</span>
-                <span class="ctx-shortcut">F5</span>
-              </div>
-
-              <div class="ctx-divider" />
-
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  dismissMenus();
-                  const row = menu().row;
-                  const text = isLeft() ? row?.left_text : row?.right_text;
-                  if (text !== null && text !== undefined) {
-                    navigator.clipboard.writeText(text);
-                    showToast(t("text_diff.ctx_copy_line") + " (" + text.length + " chars)");
-                  }
-                }}
-              >
-                <span>{t("text_diff.ctx_copy_line")}</span>
-                <span class="ctx-shortcut">Ctrl+C</span>
-              </div>
+                <div
+                  class="ctx-item"
+                  onClick={() => {
+                    dismissMenus();
+                    const row = menu().row;
+                    const text = isLeft() ? row?.left_text : row?.right_text;
+                    if (text !== null && text !== undefined) {
+                      navigator.clipboard.writeText(text);
+                      showToast(t("text_diff.ctx_copy_line") + " (" + text.length + " chars)");
+                    }
+                  }}
+                >
+                  <span>{t("text_diff.ctx_copy_line")}</span>
+                  <span class="ctx-shortcut">Ctrl+C</span>
+                </div>
+              </Show>
               <div
                 class="ctx-item"
                 onClick={() => {

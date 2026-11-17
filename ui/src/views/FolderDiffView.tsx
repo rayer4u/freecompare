@@ -9,6 +9,11 @@ import { FileBrowserModal } from "../components/FileBrowserModal";
 import { t } from "../i18n";
 import { mergeFolderExcludeGlobs } from "../utils/preferences";
 import {
+  mergeSubtreeEntries,
+  mergeTopLevelPreservingSubtrees,
+  resolveBatchTargetPaths,
+} from "../utils/folder_sync";
+import {
   displayPathBaseName,
   isSftpUri,
   joinComparePath,
@@ -44,8 +49,10 @@ interface FolderDiffViewProps {
 }
 
 type FilterStatus = "all" | "diffs" | "orphans" | "equals";
+type SelectedCellItem = { side: "left" | "right"; relPath: string };
 
 export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
+  let treeBodyRef: HTMLDivElement | undefined;
   const [folderData, setFolderData] = createSignal<FolderDiffResult>(
     createBlankFolderDiff()
   );
@@ -56,8 +63,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [collapsedDirs, setCollapsedDirs] = createSignal<Set<string>>(new Set());
   const [scannedDirs, setScannedDirs] = createSignal<Set<string>>(new Set());
   const [selectedRelPath, setSelectedRelPath] = createSignal<string | null>(null);
-  const [selectedLeftRelPath, setSelectedLeftRelPath] = createSignal<string | null>(null);
-  const [selectedRightRelPath, setSelectedRightRelPath] = createSignal<string | null>(null);
+  const [selectedItems, setSelectedItems] = createSignal<SelectedCellItem[]>([]);
   const [activeSide, setActiveSide] = createSignal<"left" | "right">("left");
   const [pendingCompareSource, setPendingCompareSource] = createSignal<{
     side: "left" | "right";
@@ -132,18 +138,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           res.entries.find((e) => !e.is_dir) ??
           res.entries[0];
         if (firstDiffFile) {
-          setSelectedRelPath(firstDiffFile.relative_path);
-          if (!firstDiffFile.is_dir) {
-            setSelectedLeftRelPath(firstDiffFile.status !== "right_only" ? firstDiffFile.relative_path : null);
-            setSelectedRightRelPath(firstDiffFile.status !== "left_only" ? firstDiffFile.relative_path : null);
-          } else {
-            setSelectedLeftRelPath(null);
-            setSelectedRightRelPath(null);
-          }
+          selectRow(firstDiffFile);
         } else {
           setSelectedRelPath(null);
-          setSelectedLeftRelPath(null);
-          setSelectedRightRelPath(null);
+          setSelectedItems([]);
         }
         const lBase = displayPathBaseName(res.left_root);
         const rBase = displayPathBaseName(res.right_root);
@@ -167,43 +165,33 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     }
   };
 
-  const handleCompareSubfolder = async (subRel: string, recursive = false) => {
-    notify(t("folder_diff.scanning_subdir", { path: subRel }));
+  const fetchSubfolder = (subRel: string, recursive = false) =>
+    callRustRpc<FolderSubtreeResult>("compare_subfolder", {
+      left_dir: folderData().left_root,
+      right_dir: folderData().right_root,
+      sub_rel: subRel,
+      options: {
+        mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+        ignore_case_names: false,
+        exclude_globs: effectiveExcludeGlobs(),
+        recursive,
+      },
+    });
+
+  const refreshSubfolder = async (
+    subRel: string,
+    recursive = false,
+    silent = false
+  ) => {
+    if (!silent) {
+      notify(t("folder_diff.scanning_subdir", { path: subRel }));
+    }
     setScannedDirs((prev) => new Set(prev).add(subRel));
     try {
-      const res = await callRustRpc<FolderSubtreeResult>("compare_subfolder", {
-        left_dir: folderData().left_root,
-        right_dir: folderData().right_root,
-        sub_rel: subRel,
-        options: {
-          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
-          ignore_case_names: false,
-          exclude_globs: effectiveExcludeGlobs(),
-          recursive,
-        },
-      });
+      const res = await fetchSubfolder(subRel, recursive);
       if (res) {
         setFolderData((prev) => {
-          const cleanRel = res.relative_path;
-          const prefix = cleanRel + "/";
-          const parentIdx = prev.entries.findIndex((e) => e.relative_path === cleanRel);
-          if (parentIdx < 0) return prev;
-
-          const updated = [...prev.entries];
-          // Update parent folder status
-          updated[parentIdx] = { ...updated[parentIdx], status: res.status };
-
-          // Remove any previously cached children under this folder
-          let removeCount = 0;
-          for (let i = parentIdx + 1; i < updated.length; i++) {
-            if (updated[i].relative_path.startsWith(prefix)) {
-              removeCount++;
-            } else {
-              break;
-            }
-          }
-          updated.splice(parentIdx + 1, removeCount, ...res.entries);
-
+          const updated = mergeSubtreeEntries(prev.entries, res);
           return {
             ...prev,
             entries: updated,
@@ -224,26 +212,114 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           return next;
         });
 
-        notify(
-          t("folder_diff.scan_subdir_done", {
-            path: res.relative_path,
-            count: res.entries.length,
-          })
-        );
+        if (!silent) {
+          notify(
+            t("folder_diff.scan_subdir_done", {
+              path: res.relative_path,
+              count: res.entries.length,
+            })
+          );
+        }
       } else {
-        notify(t("folder_diff.err_scan"));
-        setCollapsedDirs((prev) => {
+        setScannedDirs((prev) => {
           const next = new Set(prev);
           next.delete(subRel);
           return next;
         });
+        if (!silent) notify(t("folder_diff.err_scan"));
       }
     } catch (err) {
-      notify(err instanceof Error ? err.message : String(err));
-      setCollapsedDirs((prev) => {
+      setScannedDirs((prev) => {
         const next = new Set(prev);
         next.delete(subRel);
         return next;
+      });
+      if (!silent) notify(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleCompareSubfolder = (subRel: string, recursive = false) =>
+    refreshSubfolder(subRel, recursive, false);
+
+  const applySyncFolderResult = async (
+    remoteRes: FolderDiffResult,
+    affectedRelPaths: string | string[],
+    dirActionPaths: string[] = []
+  ) => {
+    const prevScrollTop = treeBodyRef?.scrollTop ?? 0;
+    const relList = Array.isArray(affectedRelPaths) ? affectedRelPaths : [affectedRelPaths];
+
+    if (isRecursiveScan()) {
+      setFolderData(remoteRes);
+    } else {
+      const dirsToRefresh = new Set<string>();
+      for (const rel of relList) {
+        const slashIdx = rel.lastIndexOf("/");
+        const parentDir = slashIdx > 0 ? rel.slice(0, slashIdx) : "";
+        if (parentDir && scannedDirs().has(parentDir) && !collapsedDirs().has(parentDir)) {
+          dirsToRefresh.add(parentDir);
+        }
+      }
+      for (const d of dirActionPaths) {
+        if (scannedDirs().has(d) && !collapsedDirs().has(d)) {
+          dirsToRefresh.add(d);
+        }
+      }
+
+      const orderedDirs = Array.from(dirsToRefresh).sort(
+        (a, b) => a.split("/").length - b.split("/").length
+      );
+      const refreshedSubtrees = (
+        await Promise.all(orderedDirs.map((d) => fetchSubfolder(d, false).catch(() => null)))
+      ).filter((s): s is FolderSubtreeResult => Boolean(s));
+
+      let nextEntries: FolderEntryDto[] = [];
+      const invalidatedSet = new Set(dirActionPaths);
+      setFolderData((prev) => {
+        let merged = mergeTopLevelPreservingSubtrees(
+          prev.entries,
+          remoteRes.entries,
+          invalidatedSet
+        );
+        for (const sub of refreshedSubtrees) {
+          merged = mergeSubtreeEntries(merged, sub);
+        }
+        nextEntries = merged;
+        return {
+          ...remoteRes,
+          entries: merged,
+          stats: recomputeFolderStats(merged),
+        };
+      });
+
+      const validDirs = new Set(
+        nextEntries.filter((e) => e.is_dir).map((e) => e.relative_path)
+      );
+      setScannedDirs((prev) => {
+        const next = new Set<string>();
+        for (const d of prev) {
+          if (validDirs.has(d)) next.add(d);
+        }
+        return next;
+      });
+      setCollapsedDirs((prev) => {
+        const next = new Set<string>();
+        for (const d of prev) {
+          if (validDirs.has(d)) next.add(d);
+        }
+        // Collapse newly discovered top-level or subtree directories that were never expanded
+        for (const d of validDirs) {
+          if (!prev.has(d) && !scannedDirs().has(d)) {
+            next.add(d);
+          }
+        }
+        return next;
+      });
+    }
+
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        if (treeBodyRef) treeBodyRef.scrollTop = prevScrollTop;
       });
     }
   };
@@ -282,40 +358,22 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     }
   };
 
-  const compareSelectedFiles = (
-    customLeft?: string,
-    customRight?: string
-  ) => {
-    const lRel = customLeft !== undefined ? customLeft : selectedLeftRelPath();
-    const rRel = customRight !== undefined ? customRight : selectedRightRelPath();
+  const isCellSelected = (side: "left" | "right", relPath: string) =>
+    selectedItems().some((item) => item.side === side && item.relPath === relPath);
 
-    if (!lRel && !rRel) {
+  const selectedFilePair = (): [SelectedCellItem, SelectedCellItem] | null => {
+    const items = selectedItems();
+    if (items.length !== 2) return null;
+    return [items[0], items[1]];
+  };
+
+  const compareSelectedFiles = () => {
+    const pair = selectedFilePair();
+    if (!pair) {
       notify(t("folder_diff.no_file_selected"));
       return;
     }
-
-    const lRoot = folderData().left_root;
-    const rRoot = folderData().right_root;
-
-    const leftFullPath = lRel ? joinComparePath(lRoot, lRel) : "";
-    const rightFullPath = rRel ? joinComparePath(rRoot, rRel) : "";
-
-    const lName = lRel ? lRel.split("/").pop() ?? lRel : "";
-    const rName = rRel ? rRel.split("/").pop() ?? rRel : "";
-
-    const displayTitle =
-      lName === rName
-        ? lName
-        : lName && rName
-        ? `${lName} ↔ ${rName}`
-        : lName || rName;
-
-    props.onOpenFileDiff(
-      leftFullPath,
-      rightFullPath,
-      displayTitle,
-      buildSiblingDiffFiles()
-    );
+    comparePairPaths(pair[0].side, pair[0].relPath, pair[1].side, pair[1].relPath);
   };
 
   const comparePairPaths = (
@@ -342,93 +400,66 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const selectRow = (entry: FolderEntryDto) => {
     setSelectedRelPath(entry.relative_path);
     if (entry.is_dir) {
-      setSelectedLeftRelPath(null);
-      setSelectedRightRelPath(null);
+      setSelectedItems([]);
       return;
     }
     const side = activeSide();
     if (side === "left" && entry.status !== "right_only") {
-      setSelectedLeftRelPath(entry.relative_path);
-      setSelectedRightRelPath(null);
+      setSelectedItems([{ side: "left", relPath: entry.relative_path }]);
     } else if (side === "right" && entry.status !== "left_only") {
-      setSelectedRightRelPath(entry.relative_path);
-      setSelectedLeftRelPath(null);
+      setSelectedItems([{ side: "right", relPath: entry.relative_path }]);
     } else if (entry.status !== "right_only") {
       setActiveSide("left");
-      setSelectedLeftRelPath(entry.relative_path);
-      setSelectedRightRelPath(null);
+      setSelectedItems([{ side: "left", relPath: entry.relative_path }]);
     } else {
       setActiveSide("right");
-      setSelectedRightRelPath(entry.relative_path);
-      setSelectedLeftRelPath(null);
+      setSelectedItems([{ side: "right", relPath: entry.relative_path }]);
     }
   };
 
-  const selectLeftCell = (entry: FolderEntryDto, e?: MouseEvent) => {
+  const selectCell = (side: "left" | "right", entry: FolderEntryDto, e?: MouseEvent) => {
+    const missingOnSide =
+      side === "left" ? entry.status === "right_only" : entry.status === "left_only";
     const pending = pendingCompareSource();
-    if (pending && !entry.is_dir && entry.status !== "right_only") {
+    if (pending && !entry.is_dir && !missingOnSide) {
       setPendingCompareSource(null);
-      comparePairPaths(pending.side, pending.relPath, "left", entry.relative_path);
+      comparePairPaths(pending.side, pending.relPath, side, entry.relative_path);
       return;
     }
     setSelectedRelPath(entry.relative_path);
-    setActiveSide("left");
-    if (entry.is_dir) {
-      setSelectedLeftRelPath(null);
-      setSelectedRightRelPath(null);
-      return;
-    }
-    if (entry.status === "right_only") {
-      setSelectedLeftRelPath(null);
+    setActiveSide(side);
+    if (entry.is_dir || missingOnSide) {
       if (!(e?.ctrlKey || e?.metaKey)) {
-        setSelectedRightRelPath(null);
+        setSelectedItems([]);
       }
       return;
     }
-    if ((e?.ctrlKey || e?.metaKey) && selectedRightRelPath()) {
-      setSelectedLeftRelPath(entry.relative_path);
+    const target: SelectedCellItem = { side, relPath: entry.relative_path };
+    if (e?.ctrlKey || e?.metaKey) {
+      setSelectedItems((prev) => {
+        const exists = prev.some(
+          (item) => item.side === side && item.relPath === entry.relative_path
+        );
+        return exists
+          ? prev.filter(
+              (item) => !(item.side === side && item.relPath === entry.relative_path)
+            )
+          : [...prev, target];
+      });
     } else {
-      setSelectedLeftRelPath(entry.relative_path);
-      setSelectedRightRelPath(null);
+      setSelectedItems([target]);
     }
   };
 
-  const selectRightCell = (entry: FolderEntryDto, e?: MouseEvent) => {
-    const pending = pendingCompareSource();
-    if (pending && !entry.is_dir && entry.status !== "left_only") {
-      setPendingCompareSource(null);
-      comparePairPaths(pending.side, pending.relPath, "right", entry.relative_path);
-      return;
-    }
-    setSelectedRelPath(entry.relative_path);
-    setActiveSide("right");
-    if (entry.is_dir) {
-      setSelectedLeftRelPath(null);
-      setSelectedRightRelPath(null);
-      return;
-    }
-    if (entry.status === "left_only") {
-      setSelectedRightRelPath(null);
-      if (!(e?.ctrlKey || e?.metaKey)) {
-        setSelectedLeftRelPath(null);
-      }
-      return;
-    }
-    if ((e?.ctrlKey || e?.metaKey) && selectedLeftRelPath()) {
-      setSelectedRightRelPath(entry.relative_path);
-    } else {
-      setSelectedRightRelPath(entry.relative_path);
-      setSelectedLeftRelPath(null);
-    }
-  };
+  const selectLeftCell = (entry: FolderEntryDto, e?: MouseEvent) =>
+    selectCell("left", entry, e);
+
+  const selectRightCell = (entry: FolderEntryDto, e?: MouseEvent) =>
+    selectCell("right", entry, e);
 
   const clearCrossSelection = () => {
     setPendingCompareSource(null);
-    if (activeSide() === "left") {
-      setSelectedRightRelPath(null);
-    } else {
-      setSelectedLeftRelPath(null);
-    }
+    setSelectedItems([]);
   };
 
   const handleLeftDblClick = (entry: FolderEntryDto) => {
@@ -535,7 +566,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       selectRow(list[prevIdx]);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      if (selectedLeftRelPath() && selectedRightRelPath()) {
+      if (selectedFilePair()) {
         compareSelectedFiles();
         return;
       }
@@ -696,34 +727,56 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
   const handleCopyItem = async (
     direction: "left_to_right" | "right_to_left",
-    targetPath?: string
+    targetPathOrList?: string | string[]
   ) => {
-    const rel = targetPath ?? selectedRelPath();
-    if (!rel) return;
+    const rawList = Array.isArray(targetPathOrList)
+      ? targetPathOrList
+      : [targetPathOrList ?? selectedRelPath() ?? ""];
+    const relList = rawList.filter(Boolean);
+    if (relList.length === 0) return;
 
+    const entryMap = new Map(
+      folderData().entries.map((e) => [e.relative_path, e])
+    );
+    const dirActionPaths = relList.filter((rel) => entryMap.get(rel)?.is_dir);
     const action =
       direction === "left_to_right" ? "copy_left_to_right" : "copy_right_to_left";
-    try {
-      const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
-        left_dir: folderData().left_root,
-        right_dir: folderData().right_root,
-        relative_path: rel,
-        action,
-        options: {
-          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
-          ignore_case_names: false,
-          exclude_globs: effectiveExcludeGlobs(),
-          recursive: isRecursiveScan(),
-        },
-      });
 
-      if (remoteRes) {
-        setFolderData(remoteRes);
-        notify(
-          direction === "left_to_right"
-            ? t("folder_diff.copied_to_right_done", { path: rel })
-            : t("folder_diff.copied_to_left_done", { path: rel })
-        );
+    let lastRemoteRes: FolderDiffResult | null = null;
+    try {
+      for (const rel of relList) {
+        const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
+          left_dir: folderData().left_root,
+          right_dir: folderData().right_root,
+          relative_path: rel,
+          action,
+          options: {
+            mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+            ignore_case_names: false,
+            exclude_globs: effectiveExcludeGlobs(),
+            recursive: isRecursiveScan(),
+          },
+        });
+        if (remoteRes) {
+          lastRemoteRes = remoteRes;
+        }
+      }
+
+      if (lastRemoteRes) {
+        await applySyncFolderResult(lastRemoteRes, relList, dirActionPaths);
+        if (relList.length === 1) {
+          notify(
+            direction === "left_to_right"
+              ? t("folder_diff.copied_to_right_done", { path: relList[0] })
+              : t("folder_diff.copied_to_left_done", { path: relList[0] })
+          );
+        } else {
+          notify(
+            direction === "left_to_right"
+              ? t("folder_diff.batch_copied_to_right_done", { count: relList.length })
+              : t("folder_diff.batch_copied_to_left_done", { count: relList.length })
+          );
+        }
         return;
       }
     } catch (err) {
@@ -735,9 +788,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       return;
     }
 
+    const relSet = new Set(relList);
     setFolderData((prev) => {
       const updated = prev.entries.map((item) => {
-        if (item.relative_path !== rel) return item;
+        if (!relSet.has(item.relative_path)) return item;
         const now = Date.now();
         if (direction === "left_to_right" && item.left_size !== null) {
           return {
@@ -767,48 +821,64 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
   const handleDeleteItem = async (
     side: "left" | "right",
-    entry: FolderEntryDto
+    entryOrList: FolderEntryDto | FolderEntryDto[]
   ) => {
-    if (side === "left" && entry.status === "right_only") return;
-    if (side === "right" && entry.status === "left_only") return;
+    const rawList = Array.isArray(entryOrList) ? entryOrList : [entryOrList];
+    const targets = rawList.filter((entry) => {
+      if (side === "left" && entry.status === "right_only") return false;
+      if (side === "right" && entry.status === "left_only") return false;
+      return true;
+    });
+    if (targets.length === 0) return;
 
     const confirmMsg =
-      side === "left"
-        ? t("folder_diff.delete_left_confirm", { path: entry.relative_path })
-        : t("folder_diff.delete_right_confirm", { path: entry.relative_path });
+      targets.length === 1
+        ? side === "left"
+          ? t("folder_diff.delete_left_confirm", { path: targets[0].relative_path })
+          : t("folder_diff.delete_right_confirm", { path: targets[0].relative_path })
+        : t("folder_diff.batch_delete_confirm", { count: targets.length });
     if (!window.confirm(confirmMsg)) return;
 
     const action = side === "left" ? "delete_left" : "delete_right";
+    let lastRemoteRes: FolderDiffResult | null = null;
     try {
-      const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
-        left_dir: folderData().left_root,
-        right_dir: folderData().right_root,
-        relative_path: entry.relative_path,
-        action,
-        options: {
-          mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
-          ignore_case_names: false,
-          exclude_globs: effectiveExcludeGlobs(),
-          recursive: isRecursiveScan(),
-        },
-      });
-      if (remoteRes) {
-        setFolderData(remoteRes);
-        const stillExists = new Set(remoteRes.entries.map((e) => e.relative_path));
+      for (const entry of targets) {
+        const remoteRes = await callRustRpc<FolderDiffResult>("sync_folder_item", {
+          left_dir: folderData().left_root,
+          right_dir: folderData().right_root,
+          relative_path: entry.relative_path,
+          action,
+          options: {
+            mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
+            ignore_case_names: false,
+            exclude_globs: effectiveExcludeGlobs(),
+            recursive: isRecursiveScan(),
+          },
+        });
+        if (remoteRes) {
+          lastRemoteRes = remoteRes;
+        }
+      }
+      if (lastRemoteRes) {
+        await applySyncFolderResult(
+          lastRemoteRes,
+          targets.map((e) => e.relative_path),
+          targets.filter((e) => e.is_dir).map((e) => e.relative_path)
+        );
+        const stillExists = new Set(folderData().entries.map((e) => e.relative_path));
         if (selectedRelPath() && !stillExists.has(selectedRelPath()!)) {
           setSelectedRelPath(null);
         }
-        if (selectedLeftRelPath() && !stillExists.has(selectedLeftRelPath()!)) {
-          setSelectedLeftRelPath(null);
+        setSelectedItems((prev) => prev.filter((item) => stillExists.has(item.relPath)));
+        if (targets.length === 1) {
+          notify(
+            side === "left"
+              ? t("folder_diff.deleted_left_done", { path: targets[0].relative_path })
+              : t("folder_diff.deleted_right_done", { path: targets[0].relative_path })
+          );
+        } else {
+          notify(t("folder_diff.batch_deleted_done", { count: targets.length }));
         }
-        if (selectedRightRelPath() && !stillExists.has(selectedRightRelPath()!)) {
-          setSelectedRightRelPath(null);
-        }
-        notify(
-          side === "left"
-            ? t("folder_diff.deleted_left_done", { path: entry.relative_path })
-            : t("folder_diff.deleted_right_done", { path: entry.relative_path })
-        );
       }
     } catch (err) {
       notify(
@@ -909,8 +979,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
         <div class="bc-toolbar-group">
           <button
-            class={`bc-tool-btn ${selectedLeftRelPath() && selectedRightRelPath() ? "active" : ""}`}
-            disabled={!selectedLeftRelPath() || !selectedRightRelPath()}
+            class={`bc-tool-btn ${selectedFilePair() ? "active" : ""}`}
+            disabled={!selectedFilePair()}
             onClick={() => compareSelectedFiles()}
             title={t("folder_diff.compare_selected_tip")}
           >
@@ -1015,59 +1085,6 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         </div>
       </Show>
 
-      {/* Pending Compare-To Hint Bar */}
-      <Show when={pendingCompareSource()}>
-        {(pending) => (
-          <div class="selected-compare-bar">
-            <div class="selected-compare-info">
-              <span class="compare-badge">{t("folder_diff.compare_to_another")}</span>
-              <span>
-                {t("folder_diff.compare_to_hint", {
-                  name: pending().relPath.split("/").pop() ?? pending().relPath,
-                })}
-              </span>
-            </div>
-            <div class="selected-compare-actions">
-              <button
-                class="compare-clear-btn"
-                onClick={() => setPendingCompareSource(null)}
-                title={t("folder_diff.clear_selection")}
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        )}
-      </Show>
-
-      {/* Cross-file Compare Action Bar (Ctrl+Click 2 files) */}
-      <Show when={!pendingCompareSource() && selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
-        <div class="selected-compare-bar">
-          <div class="selected-compare-info">
-            <span class="compare-badge">⇄ {t("folder_diff.cross_compare_badge")}</span>
-            <span class="compare-file left" title={selectedLeftRelPath()!}>
-              {selectedLeftRelPath()}
-            </span>
-            <span class="compare-vs">↔</span>
-            <span class="compare-file right" title={selectedRightRelPath()!}>
-              {selectedRightRelPath()}
-            </span>
-          </div>
-          <div class="selected-compare-actions">
-            <button class="compare-now-btn" onClick={() => compareSelectedFiles()}>
-              ⇄ {t("folder_diff.compare_selected")} (Enter)
-            </button>
-            <button
-              class="compare-clear-btn"
-              onClick={clearCrossSelection}
-              title={t("folder_diff.clear_selection")}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      </Show>
-
       {/* Side-by-Side Synchronized Folder TreeGrid */}
       <div class="folder-tree-container">
         <div class="folder-tree-header">
@@ -1076,7 +1093,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             <span class="col-size">{t("folder_diff.col_left_size")}</span>
             <span class="col-time">{t("folder_diff.col_modified")}</span>
           </div>
-          <div class="folder-col-center">{t("folder_diff.col_status")}</div>
+          <div class="folder-col-center" onClick={(e) => e.stopPropagation()}>{t("folder_diff.col_status")}</div>
           <div class="folder-col-right">
             <span class="col-name">{t("folder_diff.col_name")}</span>
             <span class="col-size">{t("folder_diff.col_right_size")}</span>
@@ -1084,7 +1101,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           </div>
         </div>
 
-        <div class="folder-tree-body" style={{ position: "relative" }}>
+        <div class="folder-tree-body" ref={treeBodyRef} style={{ position: "relative" }}>
           <Show when={(folderData()?.entries?.length ?? 0) === 0}>
             <div class="empty-paste-overlay">
               <div class="paste-hint-card">
@@ -1102,8 +1119,8 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                 <FolderRow
                   entry={entry}
                   isSelected={entry.is_dir && selectedRelPath() === entry.relative_path}
-                  isLeftSelected={selectedLeftRelPath() === entry.relative_path}
-                  isRightSelected={selectedRightRelPath() === entry.relative_path}
+                  isLeftSelected={isCellSelected("left", entry.relative_path)}
+                  isRightSelected={isCellSelected("right", entry.relative_path)}
                   isCollapsed={collapsedDirs().has(entry.relative_path)}
                   onSelectRow={() => selectRow(entry)}
                   onSelectLeft={(e) => selectLeftCell(entry, e)}
@@ -1126,17 +1143,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                   onContextMenu={(e, side) => {
                     e.preventDefault();
                     if (side === "left") {
-                      if (
-                        selectedLeftRelPath() !== entry.relative_path ||
-                        selectedRightRelPath() !== null
-                      ) {
+                      if (!isCellSelected("left", entry.relative_path)) {
                         selectLeftCell(entry);
                       }
                     } else if (side === "right") {
-                      if (
-                        selectedRightRelPath() !== entry.relative_path ||
-                        selectedLeftRelPath() !== null
-                      ) {
+                      if (!isCellSelected("right", entry.relative_path)) {
                         selectRightCell(entry);
                       }
                     } else {
@@ -1226,35 +1237,33 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                       side: m.side === "right" ? "right" : "left",
                       relPath: m.entry.relative_path,
                     });
+                    notify(
+                      t("folder_diff.compare_to_hint", {
+                        name: m.entry.relative_path.split("/").pop() ?? m.entry.relative_path,
+                      })
+                    );
                   }}
                 >
                   <span>{t("folder_diff.compare_to_another")}</span>
                 </div>
               </Show>
 
-              {/* Option when both sides are Ctrl+Click selected and differ */}
-              <Show when={selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
-                <div
-                  class="ctx-item highlight"
-                  onClick={() => {
-                    setContextMenu(null);
-                    compareSelectedFiles();
-                  }}
-                >
-                  <span>{t("folder_diff.compare_both_selected", {
-                    left: selectedLeftRelPath()!.split("/").pop() ?? selectedLeftRelPath()!,
-                    right: selectedRightRelPath()!.split("/").pop() ?? selectedRightRelPath()!,
-                  })}</span>
-                </div>
-                <div
-                  class="ctx-item"
-                  onClick={() => {
-                    setContextMenu(null);
-                    clearCrossSelection();
-                  }}
-                >
-                  <span>{t("folder_diff.clear_selection")}</span>
-                </div>
+              {/* Quick Compare option whenever exactly 2 files are selected (same-side or cross-side) */}
+              <Show when={selectedFilePair()}>
+                {(pair) => (
+                  <div
+                    class="ctx-item highlight"
+                    onClick={() => {
+                      setContextMenu(null);
+                      compareSelectedFiles();
+                    }}
+                  >
+                    <span>{t("folder_diff.compare_both_selected", {
+                      left: pair()[0].relPath.split("/").pop() ?? pair()[0].relPath,
+                      right: pair()[1].relPath.split("/").pop() ?? pair()[1].relPath,
+                    })}</span>
+                  </div>
+                )}
               </Show>
 
               <div class="ctx-divider" />
@@ -1270,54 +1279,101 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               </div>
               <div class="ctx-divider" />
             </Show>
-            <Show when={menu().entry.status !== "right_only"}>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  const rel = menu().entry.relative_path;
-                  setContextMenu(null);
-                  handleCopyItem("left_to_right", rel);
-                }}
-              >
-                <span>{t("folder_diff.copy_to_right_item")}</span>
-              </div>
-            </Show>
-            <Show when={menu().entry.status !== "left_only"}>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  const rel = menu().entry.relative_path;
-                  setContextMenu(null);
-                  handleCopyItem("right_to_left", rel);
-                }}
-              >
-                <span>{t("folder_diff.copy_to_left_item")}</span>
-              </div>
-            </Show>
-            <Show when={menu().entry.status !== "right_only"}>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  const entry = menu().entry;
-                  setContextMenu(null);
-                  handleDeleteItem("left", entry);
-                }}
-              >
-                <span>{t("folder_diff.delete_left_item")}</span>
-              </div>
-            </Show>
-            <Show when={menu().entry.status !== "left_only"}>
-              <div
-                class="ctx-item"
-                onClick={() => {
-                  const entry = menu().entry;
-                  setContextMenu(null);
-                  handleDeleteItem("right", entry);
-                }}
-              >
-                <span>{t("folder_diff.delete_right_item")}</span>
-              </div>
-            </Show>
+            {(() => {
+              const hasLeftSel = selectedItems().some((i) => i.side === "left");
+              const hasRightSel = selectedItems().some((i) => i.side === "right");
+              const bothSidesSelected = hasLeftSel && hasRightSel;
+              const entry = menu().entry;
+              const side = menu().side;
+              const targetSide: "left" | "right" | null =
+                side === "left" && entry.status !== "right_only"
+                  ? "left"
+                  : side === "right" && entry.status !== "left_only"
+                  ? "right"
+                  : entry.status === "left_only"
+                  ? "left"
+                  : entry.status === "right_only"
+                  ? "right"
+                  : null;
+              return (
+                <>
+                  <Show when={!bothSidesSelected && hasLeftSel && entry.status !== "right_only"}>
+                    <div
+                      class="ctx-item"
+                      onClick={() => {
+                        const rel = entry.relative_path;
+                        const entryMap = new Map(
+                          folderData().entries.map((e) => [e.relative_path, e])
+                        );
+                        const eligible = selectedItems()
+                          .filter(
+                            (i) =>
+                              i.side === "left" &&
+                              entryMap.get(i.relPath)?.status !== "right_only"
+                          )
+                          .map((i) => i.relPath);
+                        const targets = resolveBatchTargetPaths(rel, eligible);
+                        setContextMenu(null);
+                        handleCopyItem("left_to_right", targets);
+                      }}
+                    >
+                      <span>{t("folder_diff.copy_to_right_item")}</span>
+                    </div>
+                  </Show>
+                  <Show when={!bothSidesSelected && hasRightSel && entry.status !== "left_only"}>
+                    <div
+                      class="ctx-item"
+                      onClick={() => {
+                        const rel = entry.relative_path;
+                        const entryMap = new Map(
+                          folderData().entries.map((e) => [e.relative_path, e])
+                        );
+                        const eligible = selectedItems()
+                          .filter(
+                            (i) =>
+                              i.side === "right" &&
+                              entryMap.get(i.relPath)?.status !== "left_only"
+                          )
+                          .map((i) => i.relPath);
+                        const targets = resolveBatchTargetPaths(rel, eligible);
+                        setContextMenu(null);
+                        handleCopyItem("right_to_left", targets);
+                      }}
+                    >
+                      <span>{t("folder_diff.copy_to_left_item")}</span>
+                    </div>
+                  </Show>
+                  <Show when={targetSide !== null}>
+                    <div
+                      class="ctx-item"
+                      onClick={() => {
+                        const side = targetSide!;
+                        const entryMap = new Map(
+                          folderData().entries.map((e) => [e.relative_path, e])
+                        );
+                        const eligible = selectedItems()
+                          .filter((i) => i.side === side)
+                          .map((i) => i.relPath);
+                        const targetPaths = resolveBatchTargetPaths(
+                          entry.relative_path,
+                          eligible
+                        );
+                        const targetEntries = targetPaths
+                          .map((p) => entryMap.get(p))
+                          .filter((e): e is FolderEntryDto => Boolean(e));
+                        setContextMenu(null);
+                        handleDeleteItem(
+                          side,
+                          targetEntries.length > 0 ? targetEntries : [entry]
+                        );
+                      }}
+                    >
+                      <span>{t("folder_diff.delete_selected_item")}</span>
+                    </div>
+                  </Show>
+                </>
+              );
+            })()}
             <div class="ctx-divider" />
             <div
               class="ctx-item"
@@ -1344,7 +1400,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               class="ctx-item"
               onClick={() => {
                 setContextMenu(null);
-                scanRealFolders(leftInput(), rightInput());
+                scanRealFolders(leftInput(), rightInput(), isRecursiveScan());
               }}
             >
               <span>{t("folder_diff.ctx_rescan")}</span>
@@ -1502,7 +1558,7 @@ const FolderRow: Component<{
         <span class="col-time">{formatTime(props.entry.left_modified_ms)}</span>
       </div>
 
-      <div class="folder-col-center">
+      <div class="folder-col-center" onClick={(e) => e.stopPropagation()}>
         <Show when={!props.entry.is_dir && props.entry.status !== "equal" && props.entry.status !== "right_only"}>
           <button
             class="gutter-copy-btn"

@@ -1280,6 +1280,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 75px 135px;
   align-items: center;
+  height: 100%;
   padding: 0 10px;
   min-width: 0;
   overflow: hidden;

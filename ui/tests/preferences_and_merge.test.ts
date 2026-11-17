@@ -9,6 +9,7 @@ import {
   loadRealThreeWayFiles,
   resolveThreeWayHunk,
   saveThreeWayMerged,
+  subscribeUserPreferences,
 } from "../src/bridge.ts";
 import {
   computeNextHunkIndex,
@@ -18,6 +19,12 @@ import {
   mergeFolderExcludeGlobs,
   parseGlobsInput,
 } from "../src/utils/preferences.ts";
+import {
+  collectExpandedLoadedDirs,
+  mergeSubtreeEntries,
+  mergeTopLevelPreservingSubtrees,
+  resolveBatchTargetPaths,
+} from "../src/utils/folder_sync.ts";
 import type { ThreeWayHunk } from "../src/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -437,17 +444,267 @@ test("FolderDiffView single-side focus & one-shot compare_to_another contract", 
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/views/FolderDiffView.tsx"),
     "utf8"
   );
-  // Plain click on one side clears the other side's focus
-  assert.match(folderSrc, /setSelectedLeftRelPath\(entry\.relative_path\);\s*setSelectedRightRelPath\(null\);/);
-  assert.match(folderSrc, /setSelectedRightRelPath\(entry\.relative_path\);\s*setSelectedLeftRelPath\(null\);/);
+  // Plain click replaces selection with single item; Ctrl/Cmd + click toggles in selectedItems (same-side or cross-side)
+  assert.match(folderSrc, /setSelectedItems\(\[target\]\)/);
+  assert.match(folderSrc, /items\.length !== 2/);
+  assert.match(folderSrc, /selectedFilePair\(\)/);
   // Ctrl/Cmd + click still allows pairing 2 items
   assert.match(folderSrc, /e\?\.ctrlKey \|\| e\?\.metaKey/);
   // Context menu uses one-shot Compare To... instead of persistent "Select as Left/Right"
   assert.match(folderSrc, /folder_diff\.compare_to_another/);
   assert.doesNotMatch(folderSrc, /folder_diff\.select_as_left/);
   assert.doesNotMatch(folderSrc, /folder_diff\.select_as_right/);
-  // No inline "selected left/right" badge and no inline copy buttons on directory rows
+  // No inline "selected left/right" badge, no jumping compare banner, and no inline copy buttons on directory rows
   assert.doesNotMatch(folderSrc, /side-selected-tag/);
+  assert.doesNotMatch(folderSrc, /selected-compare-bar/);
   assert.match(folderSrc, /!props\.entry\.is_dir && props\.entry\.status !== "equal" && props\.entry\.status !== "right_only"/);
   assert.match(folderSrc, /!props\.entry\.is_dir && props\.entry\.status !== "equal" && props\.entry\.status !== "left_only"/);
+});
+
+test("FolderDiffView context menu copy/delete/global actions & full-height hit-area contracts", () => {
+  const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const folderSrc = fs.readFileSync(path.join(rootDir, "src/views/FolderDiffView.tsx"), "utf8");
+  const stylesSrc = fs.readFileSync(path.join(rootDir, "src/styles.css"), "utf8");
+
+  // Selection-driven copy visibility: only show target side copy when that side is selected, hide when both sides selected
+  assert.match(folderSrc, /const hasLeftSel = selectedItems\(\)\.some\(\(i\) => i\.side === "left"\);/);
+  assert.match(folderSrc, /const hasRightSel = selectedItems\(\)\.some\(\(i\) => i\.side === "right"\);/);
+  assert.match(folderSrc, /const bothSidesSelected = hasLeftSel && hasRightSel;/);
+  assert.match(folderSrc, /!bothSidesSelected && hasLeftSel && entry\.status !== "right_only"/);
+  assert.match(folderSrc, /!bothSidesSelected && hasRightSel && entry\.status !== "left_only"/);
+  assert.match(folderSrc, /folder_diff\.copy_to_right_item/);
+  assert.match(folderSrc, /folder_diff\.copy_to_left_item/);
+
+  // Unified delete selected item (no split delete_left_item / delete_right_item, no clear_selection)
+  assert.match(folderSrc, /folder_diff\.delete_selected_item/);
+  assert.doesNotMatch(folderSrc, /folder_diff\.delete_left_item/);
+  assert.doesNotMatch(folderSrc, /folder_diff\.delete_right_item/);
+  assert.doesNotMatch(folderSrc, /folder_diff\.clear_selection/);
+
+  // Global actions retained in folder context menu
+  assert.match(folderSrc, /folder_diff\.ctx_swap_dirs/);
+  assert.match(folderSrc, /folder_diff\.ctx_rescan/);
+
+  // Full-height row hit-area & center-column click isolation
+  assert.match(folderSrc, /<div class="folder-col-center" onClick=\{\(e\) => e\.stopPropagation\(\)\}>/);
+  assert.match(stylesSrc, /\.folder-col-left,\s*\.folder-col-right\s*\{[^}]*height:\s*100%;/);
+});
+
+test("TextDiffView context menu readonly/null-row guards & no global swap/reload", () => {
+  const textSrc = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/views/TextDiffView.tsx"),
+    "utf8"
+  );
+  const menuMatch = textSrc.match(/<Show when=\{contextMenu\(\)\}>[\s\S]*?<\/Show>\s*\n\s*\{\/\* 视图与规则浮动菜单/);
+  assert.ok(menuMatch, "expected TextDiffView context menu block");
+  const menuBlock = menuMatch[0];
+
+  // Merge actions gated on target side writability
+  assert.match(menuBlock, /<Show when=\{!props\.rightReadonly\}>/);
+  assert.match(menuBlock, /<Show when=\{!props\.leftReadonly\}>/);
+  // Edit/undo/redo/save gated on active side writability
+  assert.match(menuBlock, /<Show when=\{!\(isLeft\(\) \? props\.leftReadonly : props\.rightReadonly\)\}>/);
+  // Copy line gated on non-null text on that side
+  assert.match(
+    menuBlock,
+    /<Show\s+when=\{\s*menu\(\)\.row &&\s*\(isLeft\(\) \? menu\(\)\.row!\.left_text !== null : menu\(\)\.row!\.right_text !== null\)\s*\}\s*>/
+  );
+  // Global swap_sides / reload removed from context menu
+  assert.doesNotMatch(menuBlock, /text_diff\.swap_sides/);
+  assert.doesNotMatch(menuBlock, /text_diff\.reload/);
+});
+
+test("FolderDiffView sync_folder_item preserves expanded subdirs & subtree merge", () => {
+  // 1. collectExpandedLoadedDirs filters collapsed dirs and sorts shallow-to-deep
+  const scanned = new Set(["a/b/c", "b", "a", "a/b", "collapsed_dir"]);
+  const collapsed = new Set(["collapsed_dir"]);
+  assert.deepEqual(collectExpandedLoadedDirs(scanned, collapsed), [
+    "a",
+    "b",
+    "a/b",
+    "a/b/c",
+  ]);
+
+  // 2. mergeSubtreeEntries updates parent status and replaces cached subtree children
+  const baseEntries = [
+    {
+      relative_path: "prometheus",
+      is_dir: true,
+      status: "right_only" as const,
+      left_size: null,
+      right_size: null,
+      left_modified_ms: null,
+      right_modified_ms: 100,
+    },
+    {
+      relative_path: "prometheus/old.yml",
+      is_dir: false,
+      status: "right_only" as const,
+      left_size: null,
+      right_size: 10,
+      left_modified_ms: null,
+      right_modified_ms: 100,
+    },
+    {
+      relative_path: "tools",
+      is_dir: true,
+      status: "right_only" as const,
+      left_size: null,
+      right_size: null,
+      left_modified_ms: null,
+      right_modified_ms: 100,
+    },
+  ];
+
+  const merged = mergeSubtreeEntries(baseEntries, {
+    relative_path: "prometheus",
+    status: "modified",
+    entries: [
+      {
+        relative_path: "prometheus/alert.yml",
+        is_dir: false,
+        status: "equal",
+        left_size: 42,
+        right_size: 42,
+        left_modified_ms: 200,
+        right_modified_ms: 200,
+      },
+    ],
+  });
+
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].relative_path, "prometheus");
+  assert.equal(merged[0].status, "modified");
+  assert.equal(merged[1].relative_path, "prometheus/alert.yml");
+  assert.equal(merged[1].status, "equal");
+  assert.equal(merged[2].relative_path, "tools");
+
+  // Missing parent returns shallow copy unchanged
+  const untouched = mergeSubtreeEntries(baseEntries, {
+    relative_path: "nonexistent",
+    status: "equal",
+    entries: [],
+  });
+  assert.deepEqual(untouched, baseEntries);
+
+  // 3. mergeTopLevelPreservingSubtrees retains untouched expanded subtrees and drops invalidatedDir
+  const preserved = mergeTopLevelPreservingSubtrees(
+    [
+      {
+        relative_path: "certs",
+        is_dir: true,
+        status: "modified",
+        left_size: null,
+        right_size: null,
+        left_modified_ms: 10,
+        right_modified_ms: 10,
+      },
+      {
+        relative_path: "certs/a.pem",
+        is_dir: false,
+        status: "equal",
+        left_size: 5,
+        right_size: 5,
+        left_modified_ms: 10,
+        right_modified_ms: 10,
+      },
+      {
+        relative_path: "deleted_dir",
+        is_dir: true,
+        status: "left_only",
+        left_size: null,
+        right_size: null,
+        left_modified_ms: 10,
+        right_modified_ms: 0,
+      },
+      {
+        relative_path: "deleted_dir/x.txt",
+        is_dir: false,
+        status: "left_only",
+        left_size: 3,
+        right_size: null,
+        left_modified_ms: 10,
+        right_modified_ms: 0,
+      },
+    ],
+    [
+      {
+        relative_path: "certs",
+        is_dir: true,
+        status: "modified",
+        left_size: null,
+        right_size: null,
+        left_modified_ms: 20,
+        right_modified_ms: 20,
+      },
+    ],
+    "deleted_dir"
+  );
+  assert.deepEqual(
+    preserved.map((e) => e.relative_path),
+    ["certs", "certs/a.pem"]
+  );
+
+  // 4. Source contract: copy & delete use atomic applySyncFolderResult and preserve scrollTop
+  const folderSrc = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/views/FolderDiffView.tsx"),
+    "utf8"
+  );
+  assert.equal((folderSrc.match(/setFolderData\(remoteRes\)/g) ?? []).length, 1);
+  assert.equal((folderSrc.match(/await applySyncFolderResult\(\s*lastRemoteRes,/g) ?? []).length, 2);
+  assert.match(folderSrc, /mergeTopLevelPreservingSubtrees\(/);
+  assert.match(folderSrc, /const prevScrollTop = treeBodyRef\?\.scrollTop \?\? 0;/);
+  assert.match(folderSrc, /if \(treeBodyRef\) treeBodyRef\.scrollTop = prevScrollTop;/);
+});
+
+test("FolderDiffView multi-select batch copy/delete target resolution", () => {
+  // Multi-select within selected items returns all unique targets excluding descendants of selected dirs
+  assert.deepEqual(
+    resolveBatchTargetPaths("a.txt", ["dir1", "dir1/child.txt", "a.txt", "b.txt", "a.txt"]),
+    ["dir1", "a.txt", "b.txt"]
+  );
+  // Right-clicking an unselected item targets only that item
+  assert.deepEqual(resolveBatchTargetPaths("other.txt", ["a.txt", "b.txt"]), ["other.txt"]);
+
+  const folderSrc = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/views/FolderDiffView.tsx"),
+    "utf8"
+  );
+  assert.equal((folderSrc.match(/resolveBatchTargetPaths\(/g) ?? []).length, 3);
+  assert.match(folderSrc, /handleCopyItem\("left_to_right", targets\)/);
+  assert.match(folderSrc, /handleCopyItem\("right_to_left", targets\)/);
+});
+
+test("App global userPrefs syncs when update_user_preferences is called", async () => {
+  const originalFetch = globalThis.fetch;
+  const received: Array<{ text_row_filter?: string }> = [];
+  const unsub = subscribeUserPreferences((prefs) => {
+    received.push(prefs);
+  });
+  try {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            text_row_filter: "all",
+            folder_filter_status: "diffs",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )) as unknown as typeof fetch;
+
+    await callRustRpc("update_user_preferences", { text_row_filter: "all" });
+    assert.equal(received.length, 1);
+    assert.equal(received[0].text_row_filter, "all");
+  } finally {
+    unsub();
+    globalThis.fetch = originalFetch;
+  }
+
+  const appSrc = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/App.tsx"),
+    "utf8"
+  );
+  assert.match(appSrc, /subscribeUserPreferences\(\(nextPrefs\) => \{\s*setUserPrefs\(nextPrefs\);/);
 });

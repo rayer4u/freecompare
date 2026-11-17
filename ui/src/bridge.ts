@@ -121,6 +121,23 @@ export interface UserPreferencesDto {
 
 class RpcBackendError extends Error {}
 
+type UserPreferencesListener = (prefs: UserPreferencesDto) => void;
+const userPrefListeners = new Set<UserPreferencesListener>();
+
+export function subscribeUserPreferences(listener: UserPreferencesListener): () => void {
+  userPrefListeners.add(listener);
+  return () => {
+    userPrefListeners.delete(listener);
+  };
+}
+
+function notifyUserPreferencesListeners(prefs: unknown) {
+  if (!prefs || typeof prefs !== "object") return;
+  for (const listener of userPrefListeners) {
+    listener(prefs as UserPreferencesDto);
+  }
+}
+
 /**
  * Calls the Rust `AppBackend` via Tauri v2 IPC (`rpc_invoke`) or via the local
  * HTTP RPC server started by `fc` / `bcompare <left> <right>`.
@@ -130,30 +147,34 @@ export async function callRustRpc<T>(
   args: Record<string, unknown> = {}
 ): Promise<T | null> {
   try {
+    let result: T | null = null;
     if (isTauriRuntime()) {
       const { invoke } = await import("@tauri-apps/api/core");
-      return await invoke<T>("rpc_invoke", { cmd, args });
-    }
-    const resp = await fetch("/api/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cmd, args }),
-    });
-    if (!resp.ok) {
-      const errJson = await resp.json().catch(() => null);
-      if (errJson?.error) {
-        throw new RpcBackendError(errJson.error);
+      result = await invoke<T>("rpc_invoke", { cmd, args });
+    } else {
+      const resp = await fetch("/api/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cmd, args }),
+      });
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => null);
+        if (errJson?.error) {
+          throw new RpcBackendError(errJson.error);
+        }
+        return null;
       }
-      return null;
+      const json = await resp.json();
+      if (json && json.ok) {
+        result = json.data as T;
+      } else if (json && json.ok === false && json.error) {
+        throw new RpcBackendError(json.error);
+      }
     }
-    const json = await resp.json();
-    if (json && json.ok) {
-      return json.data as T;
+    if (cmd === "update_user_preferences" && result) {
+      notifyUserPreferencesListeners(result);
     }
-    if (json && json.ok === false && json.error) {
-      throw new RpcBackendError(json.error);
-    }
-    return null;
+    return result;
   } catch (err) {
     if (
       err instanceof RpcBackendError ||

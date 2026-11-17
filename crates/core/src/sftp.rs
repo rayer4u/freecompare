@@ -17,7 +17,7 @@ use russh::keys::{
     PublicKeyOrCertificate,
 };
 use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::OpenFlags;
+use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use serde::{Deserialize, Serialize};
 use ssh2_config::{ParseRule, SshConfig};
 use std::collections::HashMap;
@@ -1075,17 +1075,39 @@ pub fn sftp_read_bytes(uri: &str) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+pub fn build_sftp_mtime_attrs(modified_ms: u64) -> Option<FileAttributes> {
+    if modified_ms == 0 {
+        return None;
+    }
+    let secs = u32::try_from(modified_ms / 1000).unwrap_or(u32::MAX);
+    Some(FileAttributes {
+        atime: Some(secs),
+        mtime: Some(secs),
+        ..Default::default()
+    })
+}
+
 pub fn sftp_write_bytes(uri: &str, bytes: &[u8]) -> io::Result<()> {
+    sftp_write_bytes_with_mtime(uri, bytes, None)
+}
+
+pub fn sftp_write_bytes_with_mtime(
+    uri: &str,
+    bytes: &[u8],
+    modified_ms: Option<u64>,
+) -> io::Result<()> {
     let loc = SftpLocation::parse(uri)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let payload = bytes.to_vec();
+    let attrs = modified_ms.and_then(build_sftp_mtime_attrs);
     let (_, ()) = run_with_sftp_session(&loc, None, move |sftp, path| {
         let data = payload.clone();
+        let attrs = attrs.clone();
         async move {
             ensure_remote_parent_dirs(&sftp, &path).await?;
             let mut file = sftp
                 .open_with_flags(
-                    path,
+                    &path,
                     OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
                 )
                 .await
@@ -1093,6 +1115,9 @@ pub fn sftp_write_bytes(uri: &str, bytes: &[u8]) -> io::Result<()> {
             file.write_all(&data).await?;
             file.flush().await?;
             file.shutdown().await?;
+            if let Some(attrs) = attrs {
+                let _ = sftp.set_metadata(path, attrs).await;
+            }
             Ok(())
         }
     })?;
@@ -1347,4 +1372,17 @@ fn remove_remote_dir_recursive<'a>(
             .await
             .map_err(|e| map_sftp_err("删除 SFTP 空目录失败", e))
     })
+}
+
+#[cfg(test)]
+mod mtime_tests {
+    use super::*;
+
+    #[test]
+    fn build_sftp_mtime_attrs_converts_ms_and_skips_zero() {
+        assert!(build_sftp_mtime_attrs(0).is_none());
+        let attrs = build_sftp_mtime_attrs(1_700_000_123_456).expect("expected attrs");
+        assert_eq!(attrs.atime, Some(1_700_000_123));
+        assert_eq!(attrs.mtime, Some(1_700_000_123));
+    }
 }

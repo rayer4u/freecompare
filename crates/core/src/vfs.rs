@@ -7,12 +7,12 @@ use crate::buffer::expand_path;
 use crate::sftp::{
     is_sftp_uri, prime_location_credentials, sftp_create_dir_all, sftp_exists,
     sftp_hash_file_blake3, sftp_is_dir, sftp_list_dir, sftp_metadata, sftp_read_bytes,
-    sftp_remove_any, sftp_write_bytes, SftpLocation,
+    sftp_remove_any, sftp_write_bytes, sftp_write_bytes_with_mtime, SftpLocation,
 };
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub enum VfsPath {
@@ -249,9 +249,24 @@ pub fn copy_recursive(src: &str, dst: &str) -> io::Result<()> {
         }
     } else {
         let bytes = read_bytes(src)?;
-        write_bytes(dst, &bytes)?;
+        if is_sftp_uri(dst) {
+            sftp_write_bytes_with_mtime(dst, &bytes, Some(meta.modified_ms))?;
+        } else {
+            write_bytes(dst, &bytes)?;
+            if meta.modified_ms > 0 {
+                let ts = UNIX_EPOCH + Duration::from_millis(meta.modified_ms);
+                let _ = set_local_modified(&expand_path(dst), ts);
+            }
+        }
     }
     Ok(())
+}
+
+fn set_local_modified(dst: &Path, modified: SystemTime) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(dst)?
+        .set_modified(modified)
 }
 
 fn copy_local_recursive(src: &Path, dst: &Path) -> io::Result<()> {
@@ -267,6 +282,9 @@ fn copy_local_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(parent)?;
         }
         fs::copy(src, dst)?;
+        if let Ok(src_mtime) = meta.modified() {
+            let _ = set_local_modified(dst, src_mtime);
+        }
     }
     Ok(())
 }
@@ -279,5 +297,63 @@ pub fn hash_file_blake3(path: &str) -> io::Result<blake3::Hash> {
         let mut hasher = blake3::Hasher::new();
         io::copy(&mut file, &mut hasher)?;
         Ok(hasher.finalize())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::folder::{compare_folders, FolderCompareMode, FolderCompareOptions, FolderItemStatus};
+
+    #[test]
+    fn copy_recursive_preserves_mtime_so_fast_metadata_matches() {
+        let base = std::env::temp_dir().join(format!(
+            "freecompare_vfs_mtime_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let left_dir = base.join("left");
+        let right_dir = base.join("right");
+        fs::create_dir_all(&left_dir).unwrap();
+        fs::create_dir_all(&right_dir).unwrap();
+
+        let src_file = left_dir.join(".gitignore");
+        fs::write(&src_file, b"node_modules/\ntarget/\n").unwrap();
+        // Set source mtime to an old timestamp (2020-01-01T00:00:00Z = 1577836800s)
+        let old_ts = UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+        set_local_modified(&src_file, old_ts).unwrap();
+
+        let dst_file = right_dir.join(".gitignore");
+        copy_recursive(&src_file.to_string_lossy(), &dst_file.to_string_lossy()).unwrap();
+
+        let src_meta = metadata(&src_file.to_string_lossy()).unwrap();
+        let dst_meta = metadata(&dst_file.to_string_lossy()).unwrap();
+        assert!(
+            src_meta.modified_ms.abs_diff(dst_meta.modified_ms) < 2000,
+            "expected preserved mtime, got src={} dst={}",
+            src_meta.modified_ms,
+            dst_meta.modified_ms
+        );
+
+        let diff = compare_folders(
+            &left_dir,
+            &right_dir,
+            &FolderCompareOptions {
+                mode: FolderCompareMode::FastMetadata,
+                ignore_case_names: false,
+                exclude_globs: vec![],
+                recursive: false,
+                max_depth: None,
+            },
+        )
+        .unwrap();
+        let entry = diff
+            .entries
+            .iter()
+            .find(|e| e.relative_path == ".gitignore")
+            .expect(".gitignore entry should exist");
+        assert_eq!(entry.status, FolderItemStatus::Equal);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -1,6 +1,6 @@
 import { Component, createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore } from "solid-js/store";
-import { callRustRpc, StartupLaunchSessionDto, UserPreferencesDto } from "./bridge";
+import { callRustRpc, StartupLaunchSessionDto, subscribeUserPreferences, UserPreferencesDto } from "./bridge";
 import { SessionTabKind, WorkspaceTab } from "./types";
 import { HomeView } from "./views/HomeView";
 import { TextDiffView } from "./views/TextDiffView";
@@ -198,7 +198,11 @@ export const App: Component = () => {
     window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("beforeunload", handlePageHide);
 
+    const unsubPrefs = subscribeUserPreferences((nextPrefs) => {
+      setUserPrefs(nextPrefs);
+    });
     onCleanup(() => {
+      unsubPrefs();
       try {
         eventSource?.close();
       } catch {}
