@@ -263,6 +263,8 @@ export const zhCN = {
     ctx_rescan: "🔄 重新扫描此目录",
     compare_selected: "比较选中文件",
     compare_selected_tip: "比较左侧与右侧选中的文件 (支持不同文件名)",
+    compare_to_another: "🎯 比较到...",
+    compare_to_hint: "已选 {name}，请点击另一目标文件进行对比（Esc 取消）",
     select_as_left: "📌 选为左侧比较目标",
     select_as_right: "📌 选为右侧比较目标",
     compare_with_right: "⇄ 与右侧已选文件比较 ({name})",

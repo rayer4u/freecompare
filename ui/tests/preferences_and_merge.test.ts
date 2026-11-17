@@ -430,3 +430,24 @@ test("Regression: preference createEffect uses untrack to prevent SolidJS infini
   assert.strictEqual(getOptions?.().ignore_whitespace, true);
   disposeFn?.();
 });
+
+
+test("FolderDiffView single-side focus & one-shot compare_to_another contract", () => {
+  const folderSrc = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/views/FolderDiffView.tsx"),
+    "utf8"
+  );
+  // Plain click on one side clears the other side's focus
+  assert.match(folderSrc, /setSelectedLeftRelPath\(entry\.relative_path\);\s*setSelectedRightRelPath\(null\);/);
+  assert.match(folderSrc, /setSelectedRightRelPath\(entry\.relative_path\);\s*setSelectedLeftRelPath\(null\);/);
+  // Ctrl/Cmd + click still allows pairing 2 items
+  assert.match(folderSrc, /e\?\.ctrlKey \|\| e\?\.metaKey/);
+  // Context menu uses one-shot Compare To... instead of persistent "Select as Left/Right"
+  assert.match(folderSrc, /folder_diff\.compare_to_another/);
+  assert.doesNotMatch(folderSrc, /folder_diff\.select_as_left/);
+  assert.doesNotMatch(folderSrc, /folder_diff\.select_as_right/);
+  // No inline "selected left/right" badge and no inline copy buttons on directory rows
+  assert.doesNotMatch(folderSrc, /side-selected-tag/);
+  assert.match(folderSrc, /!props\.entry\.is_dir && props\.entry\.status !== "equal" && props\.entry\.status !== "right_only"/);
+  assert.match(folderSrc, /!props\.entry\.is_dir && props\.entry\.status !== "equal" && props\.entry\.status !== "left_only"/);
+});

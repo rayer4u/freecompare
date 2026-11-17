@@ -58,6 +58,11 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [selectedRelPath, setSelectedRelPath] = createSignal<string | null>(null);
   const [selectedLeftRelPath, setSelectedLeftRelPath] = createSignal<string | null>(null);
   const [selectedRightRelPath, setSelectedRightRelPath] = createSignal<string | null>(null);
+  const [activeSide, setActiveSide] = createSignal<"left" | "right">("left");
+  const [pendingCompareSource, setPendingCompareSource] = createSignal<{
+    side: "left" | "right";
+    relPath: string;
+  } | null>(null);
   const [compareMode, setCompareMode] = createSignal<"hash" | "fast">("hash");
   const [isRecursiveScan, setIsRecursiveScan] = createSignal(Boolean(props.expandAll));
   const [prefsExcludeGlobs, setPrefsExcludeGlobs] = createSignal<string[] | null>(null);
@@ -313,35 +318,116 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     );
   };
 
+  const comparePairPaths = (
+    leftSide: "left" | "right",
+    leftRel: string,
+    rightSide: "left" | "right",
+    rightRel: string
+  ) => {
+    const lRoot = leftSide === "left" ? folderData().left_root : folderData().right_root;
+    const rRoot = rightSide === "left" ? folderData().left_root : folderData().right_root;
+    const leftFullPath = joinComparePath(lRoot, leftRel);
+    const rightFullPath = joinComparePath(rRoot, rightRel);
+    const lName = leftRel.split("/").pop() ?? leftRel;
+    const rName = rightRel.split("/").pop() ?? rightRel;
+    const displayTitle = lName === rName ? lName : `${lName} ↔ ${rName}`;
+    props.onOpenFileDiff(
+      leftFullPath,
+      rightFullPath,
+      displayTitle,
+      buildSiblingDiffFiles()
+    );
+  };
+
   const selectRow = (entry: FolderEntryDto) => {
     setSelectedRelPath(entry.relative_path);
-    if (!entry.is_dir) {
-      setSelectedLeftRelPath(entry.status !== "right_only" ? entry.relative_path : null);
-      setSelectedRightRelPath(entry.status !== "left_only" ? entry.relative_path : null);
+    if (entry.is_dir) {
+      setSelectedLeftRelPath(null);
+      setSelectedRightRelPath(null);
+      return;
     }
-  };
-
-  const selectLeftCell = (entry: FolderEntryDto) => {
-    if (!entry.is_dir && entry.status !== "right_only") {
+    const side = activeSide();
+    if (side === "left" && entry.status !== "right_only") {
       setSelectedLeftRelPath(entry.relative_path);
+      setSelectedRightRelPath(null);
+    } else if (side === "right" && entry.status !== "left_only") {
+      setSelectedRightRelPath(entry.relative_path);
+      setSelectedLeftRelPath(null);
+    } else if (entry.status !== "right_only") {
+      setActiveSide("left");
+      setSelectedLeftRelPath(entry.relative_path);
+      setSelectedRightRelPath(null);
+    } else {
+      setActiveSide("right");
+      setSelectedRightRelPath(entry.relative_path);
+      setSelectedLeftRelPath(null);
     }
   };
 
-  const selectRightCell = (entry: FolderEntryDto) => {
-    if (!entry.is_dir && entry.status !== "left_only") {
+  const selectLeftCell = (entry: FolderEntryDto, e?: MouseEvent) => {
+    const pending = pendingCompareSource();
+    if (pending && !entry.is_dir && entry.status !== "right_only") {
+      setPendingCompareSource(null);
+      comparePairPaths(pending.side, pending.relPath, "left", entry.relative_path);
+      return;
+    }
+    setSelectedRelPath(entry.relative_path);
+    setActiveSide("left");
+    if (entry.is_dir) {
+      setSelectedLeftRelPath(null);
+      setSelectedRightRelPath(null);
+      return;
+    }
+    if (entry.status === "right_only") {
+      setSelectedLeftRelPath(null);
+      if (!(e?.ctrlKey || e?.metaKey)) {
+        setSelectedRightRelPath(null);
+      }
+      return;
+    }
+    if ((e?.ctrlKey || e?.metaKey) && selectedRightRelPath()) {
+      setSelectedLeftRelPath(entry.relative_path);
+    } else {
+      setSelectedLeftRelPath(entry.relative_path);
+      setSelectedRightRelPath(null);
+    }
+  };
+
+  const selectRightCell = (entry: FolderEntryDto, e?: MouseEvent) => {
+    const pending = pendingCompareSource();
+    if (pending && !entry.is_dir && entry.status !== "left_only") {
+      setPendingCompareSource(null);
+      comparePairPaths(pending.side, pending.relPath, "right", entry.relative_path);
+      return;
+    }
+    setSelectedRelPath(entry.relative_path);
+    setActiveSide("right");
+    if (entry.is_dir) {
+      setSelectedLeftRelPath(null);
+      setSelectedRightRelPath(null);
+      return;
+    }
+    if (entry.status === "left_only") {
+      setSelectedRightRelPath(null);
+      if (!(e?.ctrlKey || e?.metaKey)) {
+        setSelectedLeftRelPath(null);
+      }
+      return;
+    }
+    if ((e?.ctrlKey || e?.metaKey) && selectedLeftRelPath()) {
       setSelectedRightRelPath(entry.relative_path);
+    } else {
+      setSelectedRightRelPath(entry.relative_path);
+      setSelectedLeftRelPath(null);
     }
   };
 
   const clearCrossSelection = () => {
-    const cur = selectedRelPath();
-    const entry = folderData().entries.find((e) => e.relative_path === cur);
-    if (entry && !entry.is_dir) {
-      setSelectedLeftRelPath(entry.status !== "right_only" ? entry.relative_path : null);
-      setSelectedRightRelPath(entry.status !== "left_only" ? entry.relative_path : null);
+    setPendingCompareSource(null);
+    if (activeSide() === "left") {
+      setSelectedRightRelPath(null);
     } else {
       setSelectedLeftRelPath(null);
-      setSelectedRightRelPath(null);
     }
   };
 
@@ -351,12 +437,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       return;
     }
     if (entry.status === "right_only") return;
-    const rRel = selectedRightRelPath();
-    if (rRel && rRel !== entry.relative_path) {
-      compareSelectedFiles(entry.relative_path, rRel);
-    } else {
-      openEntry(entry);
-    }
+    openEntry(entry);
   };
 
   const handleRightDblClick = (entry: FolderEntryDto) => {
@@ -365,12 +446,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       return;
     }
     if (entry.status === "left_only") return;
-    const lRel = selectedLeftRelPath();
-    if (lRel && lRel !== entry.relative_path) {
-      compareSelectedFiles(lRel, entry.relative_path);
-    } else {
-      openEntry(entry);
-    }
+    openEntry(entry);
   };
 
   const handleFolderKeyDown = (e: KeyboardEvent) => {
@@ -380,6 +456,12 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement;
 
     if (e.key === "Escape") {
+      if (pendingCompareSource()) {
+        e.preventDefault();
+        e.stopPropagation();
+        setPendingCompareSource(null);
+        return;
+      }
       if (contextMenu()) {
         e.preventDefault();
         e.stopPropagation();
@@ -431,48 +513,26 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         for (let step = 1; step <= list.length; step++) {
           const cand = list[(Math.max(0, curIdx) + step) % list.length];
           if (!cand.is_dir && cand.status !== "equal") {
-            setSelectedRelPath(cand.relative_path);
-            if (!cand.is_dir) {
-              setSelectedLeftRelPath(cand.status !== "right_only" ? cand.relative_path : null);
-              setSelectedRightRelPath(cand.status !== "left_only" ? cand.relative_path : null);
-            }
+            selectRow(cand);
             return;
           }
         }
       }
       const nextIdx = Math.min(list.length - 1, curIdx + 1);
-      const nextItem = list[nextIdx];
-      setSelectedRelPath(nextItem.relative_path);
-      if (selectedLeftRelPath() === selectedRightRelPath() || (!selectedLeftRelPath() && !selectedRightRelPath())) {
-        if (!nextItem.is_dir) {
-          setSelectedLeftRelPath(nextItem.status !== "right_only" ? nextItem.relative_path : null);
-          setSelectedRightRelPath(nextItem.status !== "left_only" ? nextItem.relative_path : null);
-        }
-      }
+      selectRow(list[nextIdx]);
     } else if (e.key === "ArrowUp" || e.key === "k" || (e.altKey && e.key === "ArrowUp")) {
       e.preventDefault();
       if (e.altKey) {
         for (let step = 1; step <= list.length; step++) {
           const cand = list[(Math.max(0, curIdx) - step + list.length) % list.length];
           if (!cand.is_dir && cand.status !== "equal") {
-            setSelectedRelPath(cand.relative_path);
-            if (!cand.is_dir) {
-              setSelectedLeftRelPath(cand.status !== "right_only" ? cand.relative_path : null);
-              setSelectedRightRelPath(cand.status !== "left_only" ? cand.relative_path : null);
-            }
+            selectRow(cand);
             return;
           }
         }
       }
       const prevIdx = Math.max(0, curIdx - 1);
-      const prevItem = list[prevIdx];
-      setSelectedRelPath(prevItem.relative_path);
-      if (selectedLeftRelPath() === selectedRightRelPath() || (!selectedLeftRelPath() && !selectedRightRelPath())) {
-        if (!prevItem.is_dir) {
-          setSelectedLeftRelPath(prevItem.status !== "right_only" ? prevItem.relative_path : null);
-          setSelectedRightRelPath(prevItem.status !== "left_only" ? prevItem.relative_path : null);
-        }
-      }
+      selectRow(list[prevIdx]);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (selectedLeftRelPath() && selectedRightRelPath()) {
@@ -955,8 +1015,33 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
         </div>
       </Show>
 
-      {/* Cross-file Compare Action Bar */}
-      <Show when={selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
+      {/* Pending Compare-To Hint Bar */}
+      <Show when={pendingCompareSource()}>
+        {(pending) => (
+          <div class="selected-compare-bar">
+            <div class="selected-compare-info">
+              <span class="compare-badge">{t("folder_diff.compare_to_another")}</span>
+              <span>
+                {t("folder_diff.compare_to_hint", {
+                  name: pending().relPath.split("/").pop() ?? pending().relPath,
+                })}
+              </span>
+            </div>
+            <div class="selected-compare-actions">
+              <button
+                class="compare-clear-btn"
+                onClick={() => setPendingCompareSource(null)}
+                title={t("folder_diff.clear_selection")}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      {/* Cross-file Compare Action Bar (Ctrl+Click 2 files) */}
+      <Show when={!pendingCompareSource() && selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
         <div class="selected-compare-bar">
           <div class="selected-compare-info">
             <span class="compare-badge">⇄ {t("folder_diff.cross_compare_badge")}</span>
@@ -1013,25 +1098,16 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
 
           <For each={visibleEntries()}>
             {(entry) => {
-              const isSameRow = () => {
-                const l = selectedLeftRelPath();
-                const r = selectedRightRelPath();
-                if (l && r) {
-                  return l === entry.relative_path && r === entry.relative_path;
-                }
-                return selectedRelPath() === entry.relative_path && (!l || l === entry.relative_path) && (!r || r === entry.relative_path);
-              };
-
               return (
                 <FolderRow
                   entry={entry}
-                  isSelected={isSameRow()}
+                  isSelected={entry.is_dir && selectedRelPath() === entry.relative_path}
                   isLeftSelected={selectedLeftRelPath() === entry.relative_path}
                   isRightSelected={selectedRightRelPath() === entry.relative_path}
                   isCollapsed={collapsedDirs().has(entry.relative_path)}
                   onSelectRow={() => selectRow(entry)}
-                  onSelectLeft={() => selectLeftCell(entry)}
-                  onSelectRight={() => selectRightCell(entry)}
+                  onSelectLeft={(e) => selectLeftCell(entry, e)}
+                  onSelectRight={(e) => selectRightCell(entry, e)}
                   onLeftDblClick={() => handleLeftDblClick(entry)}
                   onRightDblClick={() => handleRightDblClick(entry)}
                   onToggleDir={() => toggleDir(entry.relative_path)}
@@ -1049,11 +1125,21 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
                   }
                   onContextMenu={(e, side) => {
                     e.preventDefault();
-                    if (side === "left" && !entry.is_dir && entry.status !== "right_only") {
-                      setSelectedLeftRelPath(entry.relative_path);
-                    } else if (side === "right" && !entry.is_dir && entry.status !== "left_only") {
-                      setSelectedRightRelPath(entry.relative_path);
-                    } else if (side === "row") {
+                    if (side === "left") {
+                      if (
+                        selectedLeftRelPath() !== entry.relative_path ||
+                        selectedRightRelPath() !== null
+                      ) {
+                        selectLeftCell(entry);
+                      }
+                    } else if (side === "right") {
+                      if (
+                        selectedRightRelPath() !== entry.relative_path ||
+                        selectedLeftRelPath() !== null
+                      ) {
+                        selectRightCell(entry);
+                      }
+                    } else {
                       selectRow(entry);
                     }
                     const x = Math.min(e.clientX, window.innerWidth - 240);
@@ -1125,63 +1211,28 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
               </div>
             </Show>
             <Show when={!menu().entry.is_dir}>
-              {/* Option when right-clicked on LEFT cell */}
-              <Show when={menu().side === "left" && menu().entry.status !== "right_only"}>
-                <Show when={selectedRightRelPath() && selectedRightRelPath() !== menu().entry.relative_path}>
-                  <div
-                    class="ctx-item highlight"
-                    onClick={() => {
-                      const lRel = menu().entry.relative_path;
-                      const rRel = selectedRightRelPath()!;
-                      setContextMenu(null);
-                      compareSelectedFiles(lRel, rRel);
-                    }}
-                  >
-                    <span>{t("folder_diff.compare_with_right", { name: selectedRightRelPath()!.split("/").pop() ?? selectedRightRelPath()! })}</span>
-                  </div>
-                </Show>
+              <Show
+                when={
+                  (menu().side === "left" && menu().entry.status !== "right_only") ||
+                  (menu().side === "right" && menu().entry.status !== "left_only")
+                }
+              >
                 <div
                   class="ctx-item"
                   onClick={() => {
-                    const rel = menu().entry.relative_path;
+                    const m = menu();
                     setContextMenu(null);
-                    setSelectedLeftRelPath(rel);
-                    notify(t("folder_diff.select_left_first", { path: rel }));
+                    setPendingCompareSource({
+                      side: m.side === "right" ? "right" : "left",
+                      relPath: m.entry.relative_path,
+                    });
                   }}
                 >
-                  <span>{t("folder_diff.select_as_left")}</span>
+                  <span>{t("folder_diff.compare_to_another")}</span>
                 </div>
               </Show>
 
-              {/* Option when right-clicked on RIGHT cell */}
-              <Show when={menu().side === "right" && menu().entry.status !== "left_only"}>
-                <Show when={selectedLeftRelPath() && selectedLeftRelPath() !== menu().entry.relative_path}>
-                  <div
-                    class="ctx-item highlight"
-                    onClick={() => {
-                      const lRel = selectedLeftRelPath()!;
-                      const rRel = menu().entry.relative_path;
-                      setContextMenu(null);
-                      compareSelectedFiles(lRel, rRel);
-                    }}
-                  >
-                    <span>{t("folder_diff.compare_with_left", { name: selectedLeftRelPath()!.split("/").pop() ?? selectedLeftRelPath()! })}</span>
-                  </div>
-                </Show>
-                <div
-                  class="ctx-item"
-                  onClick={() => {
-                    const rel = menu().entry.relative_path;
-                    setContextMenu(null);
-                    setSelectedRightRelPath(rel);
-                    notify(t("folder_diff.select_right_first", { path: rel }));
-                  }}
-                >
-                  <span>{t("folder_diff.select_as_right")}</span>
-                </div>
-              </Show>
-
-              {/* Option when both sides are already selected and differ */}
+              {/* Option when both sides are Ctrl+Click selected and differ */}
               <Show when={selectedLeftRelPath() && selectedRightRelPath() && selectedLeftRelPath() !== selectedRightRelPath()}>
                 <div
                   class="ctx-item highlight"
@@ -1429,11 +1480,6 @@ const FolderRow: Component<{
           <span class={hasLeft() ? "entry-label" : "entry-missing"}>
             {hasLeft() ? props.entry.name : t("folder_diff.missing_tag")}
           </span>
-          <Show when={props.isLeftSelected && !props.entry.is_dir}>
-            <span class="side-selected-tag left" title="已选为左侧比较目标">
-              {t("folder_diff.tag_selected_left")}
-            </span>
-          </Show>
           <Show when={props.entry.is_dir && props.onOpenFolderDiff}>
             <button
               class="dir-open-tab-btn"
@@ -1457,7 +1503,7 @@ const FolderRow: Component<{
       </div>
 
       <div class="folder-col-center">
-        <Show when={props.entry.status !== "equal" && props.entry.status !== "right_only"}>
+        <Show when={!props.entry.is_dir && props.entry.status !== "equal" && props.entry.status !== "right_only"}>
           <button
             class="gutter-copy-btn"
             title={t("folder_diff.copy_right_tip")}
@@ -1480,7 +1526,7 @@ const FolderRow: Component<{
             ? "→"
             : "~"}
         </span>
-        <Show when={props.entry.status !== "equal" && props.entry.status !== "left_only"}>
+        <Show when={!props.entry.is_dir && props.entry.status !== "equal" && props.entry.status !== "left_only"}>
           <button
             class="gutter-copy-btn"
             title={t("folder_diff.copy_left_tip")}
@@ -1514,11 +1560,6 @@ const FolderRow: Component<{
           <span class={hasRight() ? "entry-label" : "entry-missing"}>
             {hasRight() ? props.entry.name : t("folder_diff.missing_tag")}
           </span>
-          <Show when={props.isRightSelected && !props.entry.is_dir}>
-            <span class="side-selected-tag right" title="已选为右侧比较目标">
-              {t("folder_diff.tag_selected_right")}
-            </span>
-          </Show>
         </span>
         <span class="col-size">{formatBytes(props.entry.right_size)}</span>
         <span class="col-time">{formatTime(props.entry.right_modified_ms)}</span>

@@ -265,6 +265,8 @@ export const enUS: I18nSchema = {
     ctx_rescan: "🔄 Rescan Folders",
     compare_selected: "Compare Selected",
     compare_selected_tip: "Compare selected files on left and right sides (supports different file names)",
+    compare_to_another: "🎯 Compare To...",
+    compare_to_hint: "Selected {name}, click target file to compare (Esc to cancel)",
     select_as_left: "📌 Select as Left File for Compare",
     select_as_right: "📌 Select as Right File for Compare",
     compare_with_right: "⇄ Compare with Selected Right File ({name})",
