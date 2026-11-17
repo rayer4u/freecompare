@@ -1,6 +1,8 @@
 # FreeCompare
 
-对标 Beyond Compare，全新构建的开源跨平台（Windows / macOS / Linux），AI友好的文件对比、双向/三向合并与目录同步工具。受[OpenCompare](https://github.com/chaxiu/OpenCompare)启发，作为一个老程序员，beyondcompare的资深付费用户，AI变革的参与者，为解决bcompare的能力逐渐落后开发需求问题，探索和AI合作开发能力边界，测试验证AI的快速迭代能力，新建此项目。此项目的AI编程辅助工具是agy cli，模型是Gemini 4 Argon，effort默认low。
+[Beyond Compare](https://www.scootersoftware.com/)的一种开源免费替代，基于Rust+Tauri技术构建的开源跨平台，面向程序员，选取核心功能，用于文本(代码)、目录比较生产力工具。小巧快速，稳定可靠。
+
+受[OpenCompare](https://github.com/chaxiu/OpenCompare)启发，作为一个老程序员，beyondcompare的资深付费用户，AI变革的参与者，为解决bcompare的能力逐渐落后开发需求问题，探索和AI合作开发能力边界，测试验证AI的快速迭代能力，新建此项目。此项目的AI编程工具是agy cli，模型是Gemini 4，本人仅作为产品经理和使用者。
 
 ![UI展示](images/ui.png)
 
@@ -22,6 +24,21 @@
    - 专为新一代 Agentic AI 工具设计的改动审查机制，目前已适配 Antigravity CLI (agy)。
    - 在 AI 执行写文件与代码编辑时自动弹出双栏只读比对窗口，直观呈现 AI 的修改提议，支持“通过审查”与“拒绝修改”双向操作闭环。
    - 纯 Rust 单二进制原生实现，零外部脚本与胶水依赖，全平台（Linux / macOS / Windows）即开即用。
+
+## 与 Beyond Compare 功能对比
+
+FreeCompare 聚焦**程序员高频刚需**（代码/文本对比、目录比对同步、三向合并、SFTP、Git 与 AI 审查），不追求大而全的非代码格式支持：
+
+| 功能维度 | FreeCompare | Beyond Compare (Standard / Pro) |
+| :--- | :--- | :--- |
+| **授权与分发** | ✅ **MIT 开源免费**，单文件即开即用 | 商业付费（三向合并、SFTP 需 Pro 版） |
+| **双栏文本对比** | ✅ 支持（偏代码对齐、平滑差异连接线、编码与换行符保真） | ✅ 支持（自定义语法与重要/次要规则更丰富） |
+| **三向合并** | ✅ **内置** | Standard ❌ / Pro ✅ |
+| **文件夹比对与同步** | ✅ 支持内容/元数据对比、批量同步与跨文件名配对 | ✅ 支持，另含镜像预览与定时脚本任务（更丰富） |
+| **远程协议** | ✅ **内置 SFTP**、站点管理、加密保存密码与 `~/.ssh/config` 直连 | Standard 仅 FTP / Pro 支持 SFTP、FTPS、WebDAV 与云盘 |
+| **Git / CLI 兼容** | ✅ 兼容 `bcompare` 参数与 `-qc`，支持 `--install-git` 一键接入与 `--cli` 终端摘要 | ✅ 支持 CLI 与 Git difftool/mergetool |
+| **AI 编程审查守卫** | ✅ **原生支持**（AI 改文件前弹窗审查，一键通过/拒绝） | ❌ 无 |
+| **非文本扩展格式** | ❌ 暂不支持（聚焦代码与目录） | ✅ 支持图片、Hex、表格、PDF、音频等 |
 
 ## 编译与安装 Release 命令行 (`fcompare`)
 
