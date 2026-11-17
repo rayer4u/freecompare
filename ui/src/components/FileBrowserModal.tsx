@@ -2,12 +2,17 @@ import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js
 import { callRustRpc } from "../bridge";
 import { t } from "../i18n";
 import {
+  buildSaveSftpSiteRpcArgs,
+  buildSftpSiteDisplayUri,
   buildSftpTestRpcArgs,
   buildSftpUri,
   isSftpUri,
+  type ListSftpSitesResponse,
   type ListSshConfigHostsResponse,
   maskSftpPassword,
   parseSftpUri,
+  type SaveSftpSiteResponse,
+  type SftpSiteDto,
   type SftpTestResultDto,
   type SshConfigHostDto,
 } from "../utils/sftp";
@@ -51,7 +56,11 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
   const [statusMsg, setStatusMsg] = createSignal<string | null>(null);
   const [isBusy, setIsBusy] = createSignal(false);
 
-  // SFTP profile / quick-connect state
+  // SFTP saved sites & quick-connect state
+  const [sftpSites, setSftpSites] = createSignal<SftpSiteDto[]>([]);
+  const [selectedSiteId, setSelectedSiteId] = createSignal<string | null>(null);
+  const [rememberPassword, setRememberPassword] = createSignal(true);
+
   const [sshHosts, setSshHosts] = createSignal<SshConfigHostDto[]>([]);
   const [sftpHost, setSftpHost] = createSignal(initialParsed.host);
   const [sftpPort, setSftpPort] = createSignal(initialParsed.port);
@@ -64,6 +73,9 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
     initialIsSftp ? (props.initialPath ?? "") : ""
   );
   const [showSftpForm, setShowSftpForm] = createSignal(true);
+
+  const selectedSite = () =>
+    sftpSites().find((s) => s.id === selectedSiteId()) ?? null;
 
   let lastLoadedDir = (props.initialPath ?? "").trim();
 
@@ -90,6 +102,19 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
     setSftpRemotePath(parsed.path || "/");
   };
 
+  const loadSftpSites = async () => {
+    try {
+      const res = await callRustRpc<ListSftpSitesResponse | SftpSiteDto[]>("list_sftp_sites");
+      if (Array.isArray(res)) {
+        setSftpSites(res);
+      } else if (res && Array.isArray(res.sites)) {
+        setSftpSites(res.sites);
+      }
+    } catch {
+      // Ignore if RPC unavailable
+    }
+  };
+
   const loadSshHosts = async () => {
     try {
       const res = await callRustRpc<ListSshConfigHostsResponse | SshConfigHostDto[]>(
@@ -105,7 +130,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
     }
   };
 
-  const loadDir = async (targetPath?: string) => {
+  const loadDir = async (targetPath?: string, overrideSiteId?: string | null) => {
     setErrorMsg(null);
     setStatusMsg(null);
     const trimmedTarget = targetPath?.trim() ?? "";
@@ -118,6 +143,8 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
         dir_path: trimmedTarget ? trimmedTarget : null,
       };
       if (trimmedTarget && isSftpUri(trimmedTarget)) {
+        const effSiteId = overrideSiteId !== undefined ? overrideSiteId : selectedSiteId();
+        if (effSiteId) args.site_id = effSiteId;
         if (sftpPassword()) args.password = sftpPassword();
         if (sftpKeyPath().trim()) args.private_key_path = sftpKeyPath().trim();
         if (sftpPassphrase()) args.passphrase = sftpPassphrase();
@@ -167,6 +194,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
       const res = await callRustRpc<SftpTestResultDto>(
         "test_sftp_connection",
         buildSftpTestRpcArgs({
+          siteId: selectedSiteId() || undefined,
           uri,
           host: sftpHost(),
           port: sftpPort(),
@@ -212,22 +240,78 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
     }
   };
 
-  const handleConnectAndBrowseSftp = async (overrideUri?: string) => {
+  const handleSaveCurrentSite = async () => {
+    setErrorMsg(null);
+    setStatusMsg(null);
+    const host = sftpHost().trim();
+    if (!host) {
+      setErrorMsg(t("file_browser.sftp_missing_host"));
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const user = sftpUser().trim();
+      const defaultName = user ? `${user}@${host}` : host;
+      const args = buildSaveSftpSiteRpcArgs({
+        id: selectedSiteId(),
+        name: selectedSite()?.name || defaultName,
+        host,
+        port: sftpPort(),
+        user,
+        remotePath: sftpRemotePath(),
+        privateKeyPath: sftpKeyPath(),
+        rememberPassword: rememberPassword(),
+        password: sftpPassword(),
+        passphrase: sftpPassphrase(),
+      });
+      const saved = await callRustRpc<SaveSftpSiteResponse>("save_sftp_site", args);
+      if (saved?.site) {
+        setSelectedSiteId(saved.site.id);
+        setSftpPassword("");
+        setSftpPassphrase("");
+        await loadSftpSites();
+        setStatusMsg(t("file_browser.site_saved", { name: saved.site.name }));
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleConnectAndBrowseSftp = async (overrideUri?: string, overrideSiteId?: string | null) => {
     const uri = overrideUri ?? getTargetSftpUri();
     if (!uri) {
       setErrorMsg(t("file_browser.sftp_missing_host"));
       return;
     }
     setQuickUriInput(uri);
-    await loadDir(uri);
+    await loadDir(uri, overrideSiteId);
+  };
+
+  const handleSelectSftpSite = async (site: SftpSiteDto) => {
+    setSelectedSiteId(site.id);
+    setSftpHost(site.host);
+    setSftpPort(site.port ? String(site.port) : "");
+    setSftpUser(site.user ?? "");
+    setSftpRemotePath(site.remote_path || "/");
+    setSftpKeyPath(site.private_key_path ?? "");
+    setRememberPassword(site.remember_password);
+    setSftpPassword("");
+    setSftpPassphrase("");
+    const uri = buildSftpSiteDisplayUri(site);
+    setQuickUriInput(uri);
+    await handleConnectAndBrowseSftp(uri, site.id);
   };
 
   const handleSelectSshHostChip = async (h: SshConfigHostDto) => {
+    setSelectedSiteId(null);
     setSftpHost(h.alias);
     const chipPort = h.port && h.port !== 22 ? String(h.port) : "";
     setSftpPort(chipPort);
     setSftpUser(h.user ?? "");
     setSftpPassword("");
+    setSftpPassphrase("");
     const remotePath = sftpRemotePath().trim() || "/";
     setSftpRemotePath(remotePath);
     const uri = buildSftpUri({
@@ -238,7 +322,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
       path: remotePath,
     });
     setQuickUriInput(uri);
-    await handleConnectAndBrowseSftp(uri);
+    await handleConnectAndBrowseSftp(uri, null);
   };
 
   const handleModalKeyDown = (e: KeyboardEvent) => {
@@ -251,6 +335,7 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
 
   onMount(() => {
     document.addEventListener("keydown", handleModalKeyDown, true);
+    loadSftpSites();
     loadSshHosts();
     if (initialIsSftp) {
       loadDir(props.initialPath);
@@ -341,9 +426,35 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
           </Show>
         </div>
 
-        {/* SFTP Quick Connect & ~/.ssh/config Profiles */}
+        {/* SFTP Quick Connect, Saved Sites & ~/.ssh/config Profiles */}
         <Show when={browserTab() === "sftp" && showSftpForm()}>
           <div class="sftp-panel">
+            <Show when={sftpSites().length > 0}>
+              <div class="sftp-ssh-hosts">
+                <span class="sftp-section-label">{t("file_browser.sites_title")}</span>
+                <div class="sftp-host-chips">
+                  <For each={sftpSites()}>
+                    {(site) => (
+                      <button
+                        class={`sftp-host-chip ${selectedSiteId() === site.id ? "active" : ""}`}
+                        onClick={() => handleSelectSftpSite(site)}
+                        title={buildSftpSiteDisplayUri(site)}
+                      >
+                        <span>
+                          {site.has_password || site.has_passphrase ? "🔒" : "🌐"} {site.name}
+                        </span>
+                        <span class="sftp-host-chip-meta">
+                          {site.user ? `${site.user}@` : ""}
+                          {site.host}
+                          {site.port && site.port !== 22 ? `:${site.port}` : ""}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </Show>
+
             <div class="sftp-ssh-hosts">
               <span class="sftp-section-label">{t("file_browser.ssh_hosts_title")}</span>
               <Show
@@ -456,7 +567,11 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
                 <input
                   class="sftp-input"
                   type="password"
-                  placeholder="•••••••• (optional)"
+                  placeholder={
+                    selectedSite()?.has_password
+                      ? t("file_browser.sftp_password_saved_placeholder")
+                      : "•••••••• (optional)"
+                  }
                   value={sftpPassword()}
                   onInput={(e) => {
                     setSftpPassword(e.currentTarget.value);
@@ -479,16 +594,38 @@ export const FileBrowserModal: Component<FileBrowserModalProps> = (props) => {
                 <input
                   class="sftp-input"
                   type="password"
-                  placeholder="•••••••• (optional)"
+                  placeholder={
+                    selectedSite()?.has_passphrase
+                      ? t("file_browser.sftp_password_saved_placeholder")
+                      : "•••••••• (optional)"
+                  }
                   value={sftpPassphrase()}
                   onInput={(e) => setSftpPassphrase(e.currentTarget.value)}
                 />
               </div>
             </div>
 
+            <div class="sftp-remember-row">
+              <label class="hidden-toggle">
+                <input
+                  type="checkbox"
+                  checked={rememberPassword()}
+                  onChange={(e) => setRememberPassword(e.currentTarget.checked)}
+                />
+                {t("file_browser.sftp_remember_password")}
+              </label>
+            </div>
+
             <div class="sftp-actions-row">
               <span class="sftp-auth-hint">{t("file_browser.sftp_auth_hint")}</span>
               <div class="bc-toolbar-group">
+                <button
+                  class="bc-tool-btn"
+                  disabled={isBusy()}
+                  onClick={handleSaveCurrentSite}
+                >
+                  {t("file_browser.site_save_btn")}
+                </button>
                 <button
                   class="bc-tool-btn"
                   disabled={isBusy()}

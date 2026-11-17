@@ -29,6 +29,33 @@ export interface SftpTestResultDto {
   message?: string;
 }
 
+export interface SftpSiteDto {
+  id: string;
+  name: string;
+  host: string;
+  port?: number | null;
+  user?: string | null;
+  remote_path: string;
+  private_key_path?: string | null;
+  remember_password: boolean;
+  has_password: boolean;
+  has_passphrase: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface ListSftpSitesResponse {
+  sites: SftpSiteDto[];
+}
+
+export interface SaveSftpSiteResponse {
+  site: SftpSiteDto;
+}
+
+export interface DeleteSftpSiteResponse {
+  deleted: boolean;
+}
+
 export function isSftpUri(raw?: string | null): boolean {
   return Boolean(raw && raw.trim().toLowerCase().startsWith("sftp://"));
 }
@@ -168,6 +195,7 @@ export function maskSftpPassword(rawPath: string): string {
  * specified so `~/.ssh/config` custom ports (e.g. Port 2222) are preserved.
  */
 export function buildSftpTestRpcArgs(params: {
+  siteId?: string;
   uri: string;
   host?: string;
   port?: string;
@@ -183,6 +211,7 @@ export function buildSftpTestRpcArgs(params: {
     Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : undefined;
 
   return {
+    site_id: params.siteId?.trim() || undefined,
     uri: params.uri,
     host: params.host?.trim() || undefined,
     port: explicitPort,
@@ -191,6 +220,58 @@ export function buildSftpTestRpcArgs(params: {
     path: params.path?.trim() || undefined,
     private_key_path: params.privateKeyPath?.trim() || undefined,
     passphrase: params.passphrase || undefined,
+  };
+}
+
+/**
+ * Builds a display-only `sftp://` URI from a saved site (never embeds any secret).
+ */
+export function buildSftpSiteDisplayUri(site: Pick<SftpSiteDto, "host" | "port" | "user" | "remote_path">): string {
+  return buildSftpUri({
+    host: site.host,
+    port: site.port ? String(site.port) : "",
+    user: site.user ?? "",
+    password: "",
+    path: site.remote_path || "/",
+  });
+}
+
+/**
+ * Builds RPC args for `save_sftp_site`, preserving existing encrypted secrets when
+ * password/passphrase inputs are left blank unless explicitly cleared.
+ */
+export function buildSaveSftpSiteRpcArgs(params: {
+  id?: string | null;
+  name: string;
+  host: string;
+  port?: string;
+  user?: string;
+  remotePath?: string;
+  privateKeyPath?: string;
+  rememberPassword: boolean;
+  password?: string;
+  passphrase?: string;
+  clearPassword?: boolean;
+  clearPassphrase?: boolean;
+}): Record<string, unknown> {
+  const portStr = (params.port ?? "").trim();
+  const parsedPort = portStr ? Number.parseInt(portStr, 10) : NaN;
+  const explicitPort =
+    Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : undefined;
+
+  return {
+    id: params.id?.trim() || undefined,
+    name: params.name.trim(),
+    host: params.host.trim(),
+    port: explicitPort,
+    user: params.user?.trim() || undefined,
+    remote_path: params.remotePath?.trim() || "/",
+    private_key_path: params.privateKeyPath?.trim() || undefined,
+    remember_password: params.rememberPassword,
+    password: params.rememberPassword && params.password ? params.password : undefined,
+    passphrase: params.rememberPassword && params.passphrase ? params.passphrase : undefined,
+    clear_password: Boolean(params.clearPassword),
+    clear_passphrase: Boolean(params.clearPassphrase),
   };
 }
 

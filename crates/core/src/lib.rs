@@ -9,6 +9,7 @@ pub mod diff;
 pub mod folder;
 pub mod session;
 pub mod sftp;
+pub mod sftp_sites;
 pub mod syntax;
 pub mod vfs;
 
@@ -19,6 +20,9 @@ pub use buffer::{
 pub use sftp::{
     is_sftp_uri, list_ssh_config_hosts, test_sftp_connection, SftpConnectOptions,
     SftpConnectionTestResult, SftpLocation, SshHostEntry,
+};
+pub use sftp_sites::{
+    SaveSftpSiteInput, SftpSitePublic, SftpSiteResolvedSecrets, SftpSiteStore,
 };
 pub use cli_args::{
     exit_codes, CliInvocation, FavorSide, ForcedViewerKind, QuickCompareMode,

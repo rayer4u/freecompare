@@ -27,7 +27,7 @@ npm --prefix ui run build
 # 2. Rust 全工作区测试（core + rpc + cli e2e）
 cargo test --workspace
 
-# 3. 覆盖更新本机安装的 fcompare（需要让系统生效时执行）
+# 3. 覆盖更新本机安装的 fcompare（每次完成代码修改后的标准流程，无需额外确认直接执行）
 cargo install --path crates/cli --force
 ```
 

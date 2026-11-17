@@ -1758,6 +1758,65 @@ body {
   font-family: var(--font-mono);
 }
 
+.sftp-sites-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sftp-site-chip-wrap {
+  padding-right: 6px;
+}
+
+.sftp-site-delete-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.sftp-site-delete-btn:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.14);
+}
+
+.sftp-name-uri-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: 8px;
+}
+
+.sftp-field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.sftp-clear-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sftp-clear-btn:hover {
+  text-decoration: underline;
+}
+
+.sftp-remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .sftp-form-grid {
   display: grid;
   grid-template-columns: 2fr 80px 1.2fr 1.5fr;

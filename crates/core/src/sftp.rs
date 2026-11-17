@@ -826,6 +826,19 @@ pub fn prime_location_credentials(loc: &SftpLocation) {
     }
 }
 
+/// Primes the in-memory credential cache using explicit `SftpConnectOptions` (e.g. from saved site).
+pub fn prime_location_credentials_with_opts(loc: &SftpLocation, opts: &SftpConnectOptions) {
+    if let Ok(pool) = global_pool() {
+        let (_target, key, creds) = build_creds(loc, Some(opts));
+        if creds.password.is_some()
+            || creds.private_key_path.is_some()
+            || creds.passphrase.is_some()
+        {
+            pool.cache_credentials(key, creds);
+        }
+    }
+}
+
 fn build_creds(loc: &SftpLocation, opts: Option<&SftpConnectOptions>) -> (ResolvedSftpTarget, PoolKey, SftpCredentials) {
     let target = resolve_ssh_connection_params(loc);
     let key = PoolKey {

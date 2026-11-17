@@ -2,6 +2,16 @@ import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js
 import { AppInfoDto, callRustRpc, UserPreferencesDto } from "../bridge";
 import { currentLocale, setLocale, t } from "../i18n";
 import { parseGlobsInput } from "../utils/preferences";
+import {
+  buildSaveSftpSiteRpcArgs,
+  buildSftpSiteDisplayUri,
+  buildSftpTestRpcArgs,
+  type DeleteSftpSiteResponse,
+  type ListSftpSitesResponse,
+  type SaveSftpSiteResponse,
+  type SftpSiteDto,
+  type SftpTestResultDto,
+} from "../utils/sftp";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -9,11 +19,31 @@ interface SettingsModalProps {
 }
 
 export const SettingsModal: Component<SettingsModalProps> = (props) => {
-  const [activeTab, setActiveTab] = createSignal<"editor" | "diff" | "folder" | "git" | "about">("editor");
+  const [activeTab, setActiveTab] = createSignal<"editor" | "diff" | "folder" | "sftp" | "git" | "about">("editor");
   const [prefs, setPrefs] = createSignal<UserPreferencesDto | null>(null);
   const [appInfo, setAppInfo] = createSignal<AppInfoDto | null>(null);
   const [globsInput, setGlobsInput] = createSignal("");
   const [toast, setToast] = createSignal<string | null>(null);
+
+  // SFTP Site Management state
+  const [sftpSites, setSftpSites] = createSignal<SftpSiteDto[]>([]);
+  const [editingSiteId, setEditingSiteId] = createSignal<string | null>(null);
+  const [siteName, setSiteName] = createSignal("");
+  const [siteHost, setSiteHost] = createSignal("");
+  const [sitePort, setSitePort] = createSignal("");
+  const [siteUser, setSiteUser] = createSignal("");
+  const [siteRemotePath, setSiteRemotePath] = createSignal("/");
+  const [siteKeyPath, setSiteKeyPath] = createSignal("");
+  const [sitePassword, setSitePassword] = createSignal("");
+  const [sitePassphrase, setSitePassphrase] = createSignal("");
+  const [siteRememberPwd, setSiteRememberPwd] = createSignal(true);
+  const [clearSavedPassword, setClearSavedPassword] = createSignal(false);
+  const [clearSavedPassphrase, setClearSavedPassphrase] = createSignal(false);
+  const [sftpBusy, setSftpBusy] = createSignal(false);
+  const [sftpStatus, setSftpStatus] = createSignal<string | null>(null);
+  const [sftpError, setSftpError] = createSignal<string | null>(null);
+
+  const editingSite = () => sftpSites().find((s) => s.id === editingSiteId()) ?? null;
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -39,7 +69,162 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
     if (info) {
       setAppInfo(info);
     }
+    await loadSftpSites();
   });
+
+  const loadSftpSites = async () => {
+    try {
+      const res = await callRustRpc<ListSftpSitesResponse | SftpSiteDto[]>("list_sftp_sites");
+      if (Array.isArray(res)) {
+        setSftpSites(res);
+      } else if (res && Array.isArray(res.sites)) {
+        setSftpSites(res.sites);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const resetSftpForm = () => {
+    setEditingSiteId(null);
+    setSiteName("");
+    setSiteHost("");
+    setSitePort("");
+    setSiteUser("");
+    setSiteRemotePath("/");
+    setSiteKeyPath("");
+    setSitePassword("");
+    setSitePassphrase("");
+    setSiteRememberPwd(true);
+    setClearSavedPassword(false);
+    setClearSavedPassphrase(false);
+    setSftpStatus(null);
+    setSftpError(null);
+  };
+
+  const selectSiteForEdit = (site: SftpSiteDto) => {
+    setEditingSiteId(site.id);
+    setSiteName(site.name);
+    setSiteHost(site.host);
+    setSitePort(site.port ? String(site.port) : "");
+    setSiteUser(site.user ?? "");
+    setSiteRemotePath(site.remote_path || "/");
+    setSiteKeyPath(site.private_key_path ?? "");
+    setSitePassword("");
+    setSitePassphrase("");
+    setSiteRememberPwd(site.remember_password);
+    setClearSavedPassword(false);
+    setClearSavedPassphrase(false);
+    setSftpStatus(null);
+    setSftpError(null);
+  };
+
+  const handleSaveSftpSite = async () => {
+    setSftpError(null);
+    setSftpStatus(null);
+    if (!siteHost().trim()) {
+      setSftpError(t("file_browser.sftp_missing_host"));
+      return;
+    }
+    setSftpBusy(true);
+    try {
+      const args = buildSaveSftpSiteRpcArgs({
+        id: editingSiteId(),
+        name: siteName(),
+        host: siteHost(),
+        port: sitePort(),
+        user: siteUser(),
+        remotePath: siteRemotePath(),
+        privateKeyPath: siteKeyPath(),
+        rememberPassword: siteRememberPwd(),
+        password: sitePassword(),
+        passphrase: sitePassphrase(),
+        clearPassword: clearSavedPassword(),
+        clearPassphrase: clearSavedPassphrase(),
+      });
+      const res = await callRustRpc<SaveSftpSiteResponse>("save_sftp_site", args);
+      if (res?.site) {
+        await loadSftpSites();
+        selectSiteForEdit(res.site);
+        const msg = t("file_browser.site_saved", { name: res.site.name });
+        setSftpStatus(msg);
+        notify(msg);
+      }
+    } catch (err) {
+      setSftpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSftpBusy(false);
+    }
+  };
+
+  const handleDeleteSftpSite = async (site: SftpSiteDto) => {
+    if (!window.confirm(t("settings.sftp_site_delete_confirm", { name: site.name }))) return;
+    setSftpError(null);
+    setSftpStatus(null);
+    try {
+      const res = await callRustRpc<DeleteSftpSiteResponse>("delete_sftp_site", { id: site.id });
+      if (res?.deleted) {
+        if (editingSiteId() === site.id) {
+          resetSftpForm();
+        }
+        await loadSftpSites();
+        notify(t("file_browser.site_deleted", { name: site.name }));
+      }
+    } catch (err) {
+      setSftpError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleTestSftpSite = async () => {
+    setSftpError(null);
+    setSftpStatus(null);
+    if (!siteHost().trim()) {
+      setSftpError(t("file_browser.sftp_missing_host"));
+      return;
+    }
+    setSftpStatus(t("file_browser.sftp_testing"));
+    setSftpBusy(true);
+    try {
+      const uri = buildSftpSiteDisplayUri({
+        host: siteHost().trim(),
+        port: sitePort().trim() ? Number.parseInt(sitePort().trim(), 10) : null,
+        user: siteUser().trim() || null,
+        remote_path: siteRemotePath().trim() || "/",
+      });
+      const res = await callRustRpc<SftpTestResultDto>(
+        "test_sftp_connection",
+        buildSftpTestRpcArgs({
+          siteId: editingSiteId() || undefined,
+          uri,
+          host: siteHost(),
+          port: sitePort(),
+          user: siteUser(),
+          password: sitePassword(),
+          path: siteRemotePath(),
+          privateKeyPath: siteKeyPath(),
+          passphrase: sitePassphrase(),
+        })
+      );
+      if (res?.ok) {
+        const info =
+          res.message ||
+          [res.user ? `${res.user}@${res.host}:${res.port}` : res.host, res.auth_method, res.remote_path]
+            .filter(Boolean)
+            .join(" · ");
+        setSftpStatus(t("file_browser.sftp_test_ok", { info }));
+      } else {
+        setSftpStatus(null);
+        setSftpError(t("file_browser.sftp_test_fail", { err: res?.message || t("file_browser.err_service") }));
+      }
+    } catch (err) {
+      setSftpStatus(null);
+      setSftpError(
+        t("file_browser.sftp_test_fail", { err: err instanceof Error ? err.message : String(err) })
+      );
+    } finally {
+      setSftpBusy(false);
+    }
+  };
 
   onCleanup(() => {
     document.removeEventListener("keydown", handleModalKeyDown, true);
@@ -142,6 +327,12 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
               onClick={() => setActiveTab("folder")}
             >
               {t("settings.tab_folder")}
+            </button>
+            <button
+              class={`settings-nav-btn ${activeTab() === "sftp" ? "active" : ""}`}
+              onClick={() => setActiveTab("sftp")}
+            >
+              {t("settings.tab_sftp")}
             </button>
             <button
               class={`settings-nav-btn ${activeTab() === "git" ? "active" : ""}`}
@@ -369,7 +560,205 @@ export const SettingsModal: Component<SettingsModalProps> = (props) => {
                     </div>
                   </Show>
 
-                  {/* Tab 4: Git & Reset */}
+                  {/* Tab 4: SFTP Sites */}
+                  <Show when={activeTab() === "sftp"}>
+                    <div class="settings-group">
+                      <div class="sftp-sites-header" style={{ "margin-bottom": "6px" }}>
+                        <h4 class="settings-title" style={{ margin: 0 }}>{t("settings.sftp_sites_title")}</h4>
+                        <button class="bc-tool-btn" onClick={resetSftpForm}>
+                          {t("file_browser.site_new_btn")}
+                        </button>
+                      </div>
+                      <p style={{ "font-size": "12px", opacity: "0.8", "margin-bottom": "10px" }}>
+                        {t("settings.sftp_sites_desc")}
+                      </p>
+
+                      <Show
+                        when={sftpSites().length > 0}
+                        fallback={
+                          <div class="sftp-auth-hint" style={{ "margin-bottom": "12px" }}>
+                            {t("file_browser.sites_empty")}
+                          </div>
+                        }
+                      >
+                        <div class="sftp-host-chips" style={{ "margin-bottom": "12px", "max-height": "110px" }}>
+                          <For each={sftpSites()}>
+                            {(site) => (
+                              <div
+                                class={`sftp-host-chip sftp-site-chip-wrap ${
+                                  editingSiteId() === site.id ? "active" : ""
+                                }`}
+                                onClick={() => selectSiteForEdit(site)}
+                                title={buildSftpSiteDisplayUri(site)}
+                              >
+                                <span>
+                                  {site.has_password || site.has_passphrase ? "🔒" : "🌐"} {site.name}
+                                </span>
+                                <span class="sftp-host-chip-meta">
+                                  {site.user ? `${site.user}@` : ""}
+                                  {site.host}
+                                  {site.port && site.port !== 22 ? `:${site.port}` : ""}
+                                </span>
+                                <button
+                                  class="sftp-site-delete-btn"
+                                  title={t("file_browser.site_delete_tip")}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteSftpSite(site);
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+
+                      <div style={{ display: "flex", "flex-direction": "column", gap: "8px", "border-top": "1px solid var(--border-color)", "padding-top": "12px" }}>
+                        <div class="sftp-field">
+                          <label>{t("file_browser.site_name")}</label>
+                          <input
+                            class="sftp-input"
+                            placeholder={t("file_browser.site_name_placeholder")}
+                            value={siteName()}
+                            onInput={(e) => setSiteName(e.currentTarget.value)}
+                          />
+                        </div>
+
+                        <div class="sftp-form-grid">
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_host")}</label>
+                            <input
+                              class="sftp-input"
+                              placeholder="10.0.0.1 / ssh-alias"
+                              value={siteHost()}
+                              onInput={(e) => setSiteHost(e.currentTarget.value)}
+                            />
+                          </div>
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_port")}</label>
+                            <input
+                              class="sftp-input"
+                              placeholder="22"
+                              value={sitePort()}
+                              onInput={(e) => setSitePort(e.currentTarget.value)}
+                            />
+                          </div>
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_user")}</label>
+                            <input
+                              class="sftp-input"
+                              placeholder="(ssh config)"
+                              value={siteUser()}
+                              onInput={(e) => setSiteUser(e.currentTarget.value)}
+                            />
+                          </div>
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_path")}</label>
+                            <input
+                              class="sftp-input"
+                              placeholder="/"
+                              value={siteRemotePath()}
+                              onInput={(e) => setSiteRemotePath(e.currentTarget.value)}
+                            />
+                          </div>
+                        </div>
+
+                        <div class="sftp-auth-grid">
+                          <div class="sftp-field">
+                            <div class="sftp-field-label-row">
+                              <label>{t("file_browser.sftp_password")}</label>
+                              <Show when={editingSite()?.has_password && !clearSavedPassword()}>
+                                <button
+                                  type="button"
+                                  class="sftp-clear-btn"
+                                  onClick={() => {
+                                    setClearSavedPassword(true);
+                                    setSitePassword("");
+                                  }}
+                                >
+                                  {t("file_browser.sftp_clear_saved_pwd")}
+                                </button>
+                              </Show>
+                            </div>
+                            <input
+                              class="sftp-input"
+                              type="password"
+                              placeholder={
+                                editingSite()?.has_password && !clearSavedPassword()
+                                  ? t("file_browser.sftp_password_saved_placeholder")
+                                  : "•••••••• (optional)"
+                              }
+                              value={sitePassword()}
+                              onInput={(e) => {
+                                setSitePassword(e.currentTarget.value);
+                                if (e.currentTarget.value) setClearSavedPassword(false);
+                              }}
+                            />
+                          </div>
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_key_path")}</label>
+                            <input
+                              class="sftp-input"
+                              placeholder="~/.ssh/id_ed25519"
+                              value={siteKeyPath()}
+                              onInput={(e) => setSiteKeyPath(e.currentTarget.value)}
+                            />
+                          </div>
+                          <div class="sftp-field">
+                            <label>{t("file_browser.sftp_passphrase")}</label>
+                            <input
+                              class="sftp-input"
+                              type="password"
+                              placeholder={
+                                editingSite()?.has_passphrase && !clearSavedPassphrase()
+                                  ? t("file_browser.sftp_password_saved_placeholder")
+                                  : "•••••••• (optional)"
+                              }
+                              value={sitePassphrase()}
+                              onInput={(e) => {
+                                setSitePassphrase(e.currentTarget.value);
+                                if (e.currentTarget.value) setClearSavedPassphrase(false);
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        <div class="sftp-remember-row">
+                          <label class="hidden-toggle">
+                            <input
+                              type="checkbox"
+                              checked={siteRememberPwd()}
+                              onChange={(e) => setSiteRememberPwd(e.currentTarget.checked)}
+                            />
+                            {t("file_browser.sftp_remember_password")}
+                          </label>
+                        </div>
+
+                        <Show when={sftpStatus()}>
+                          <div class="modal-success-banner">{sftpStatus()}</div>
+                        </Show>
+                        <Show when={sftpError()}>
+                          <div class="modal-error-banner">{sftpError()}</div>
+                        </Show>
+
+                        <div class="sftp-actions-row">
+                          <span class="sftp-auth-hint">{t("file_browser.sftp_auth_hint")}</span>
+                          <div class="bc-toolbar-group">
+                            <button class="bc-tool-btn" disabled={sftpBusy()} onClick={handleTestSftpSite}>
+                              {t("file_browser.sftp_test_btn")}
+                            </button>
+                            <button class="bc-tool-btn active" disabled={sftpBusy()} onClick={handleSaveSftpSite}>
+                              {editingSiteId() ? t("file_browser.site_update_btn") : t("file_browser.site_save_btn")}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Show>
+
+                  {/* Tab 5: Git & Reset */}
                   <Show when={activeTab() === "git"}>
                     <div class="settings-group">
                       <h4 class="settings-title">{t("settings.git_title")}</h4>

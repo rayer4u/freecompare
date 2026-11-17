@@ -16,10 +16,10 @@ use freecompare_core::{
         FolderDiffResult, FolderSyncActionKind,
     },
     is_sftp_uri, list_ssh_config_hosts,
-    sftp::{prime_location_credentials, sftp_list_dir, SftpLocation},
-    test_sftp_connection, vfs, EncodingKind, LineEnding, SessionKind, SessionManager,
-    SessionRecord, SftpConnectOptions, SftpConnectionTestResult, SshHostEntry,
-    StartupLaunchSession, TextBuffer, UserPreferences,
+    sftp::{prime_location_credentials, prime_location_credentials_with_opts, sftp_list_dir, SftpLocation},
+    test_sftp_connection, vfs, EncodingKind, LineEnding, SaveSftpSiteInput, SessionKind,
+    SessionManager, SessionRecord, SftpConnectOptions, SftpConnectionTestResult, SftpSitePublic,
+    SftpSiteStore, SshHostEntry, StartupLaunchSession, TextBuffer, UserPreferences,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -100,6 +100,7 @@ pub fn get_app_info() -> AppInfoDto {
 
 pub struct AppBackend {
     pub manager: SessionManager,
+    pub sftp_sites: SftpSiteStore,
     pub exit_code: AtomicI32,
 }
 
@@ -113,7 +114,30 @@ impl AppBackend {
     pub fn new() -> Self {
         Self {
             manager: SessionManager::new(),
+            sftp_sites: SftpSiteStore::new_default(),
             exit_code: AtomicI32::new(0),
+        }
+    }
+
+    pub fn prime_saved_sftp_credentials(&self, raw: &str) {
+        let trimmed = raw.trim();
+        if !is_sftp_uri(trimmed) {
+            return;
+        }
+        let Ok(loc) = SftpLocation::parse(trimmed) else {
+            return;
+        };
+        if loc.password.is_some() {
+            prime_location_credentials(&loc);
+            return;
+        }
+        if let Some(site) =
+            self.sftp_sites
+                .find_matching_site(&loc.host, loc.port, loc.user.as_deref())
+        {
+            if let Ok(opts) = self.sftp_sites.build_connect_options(&site.id, None) {
+                prime_location_credentials_with_opts(&loc, &opts);
+            }
         }
     }
 
@@ -450,6 +474,9 @@ impl AppBackend {
     ) -> Result<FsListResponse, String> {
         if let Some(raw) = dir_path.map(str::trim).filter(|s| !s.is_empty()) {
             if is_sftp_uri(raw) {
+                if sftp_opts.is_none() {
+                    self.prime_saved_sftp_credentials(raw);
+                }
                 let listing =
                     sftp_list_dir(raw, sftp_opts).map_err(|e| format!("无法读取 SFTP 目录 {raw}: {e}"))?;
                 return Ok(FsListResponse {
@@ -547,6 +574,7 @@ impl AppBackend {
     }
 
     pub fn read_text_file(&self, path: &str) -> Result<ReadTextFileResponse, String> {
+        self.prime_saved_sftp_credentials(path);
         let expanded = expand_path(path);
         let raw_str = expanded.to_string_lossy().to_string();
         let buffer = TextBuffer::from_file(&expanded)
@@ -572,6 +600,7 @@ impl AppBackend {
         encoding: Option<&str>,
         line_ending: Option<&str>,
     ) -> Result<(), String> {
+        self.prime_saved_sftp_credentials(path);
         let expanded = expand_path(path);
         let path_str = expanded.to_string_lossy().to_string();
         if let Ok(loc) = SftpLocation::parse(&path_str) {
@@ -612,6 +641,18 @@ impl AppBackend {
         list_ssh_config_hosts()
     }
 
+    pub fn list_sftp_sites(&self) -> Vec<SftpSitePublic> {
+        self.sftp_sites.list_sites()
+    }
+
+    pub fn save_sftp_site(&self, input: SaveSftpSiteInput) -> Result<SftpSitePublic, String> {
+        self.sftp_sites.save_site(input)
+    }
+
+    pub fn delete_sftp_site(&self, id: &str) -> Result<bool, String> {
+        self.sftp_sites.delete_site(id)
+    }
+
     pub fn test_sftp_connection(
         &self,
         opts: &SftpConnectOptions,
@@ -626,6 +667,8 @@ impl AppBackend {
         options: DiffOptions,
         initial_row_count: usize,
     ) -> Result<OpenTwoWayResponse, String> {
+        self.prime_saved_sftp_credentials(left_path);
+        self.prime_saved_sftp_credentials(right_path);
         let left_expanded = expand_path(left_path);
         let right_expanded = expand_path(right_path);
         let left_str = canonical_or_display(&left_expanded);
@@ -801,6 +844,12 @@ impl AppBackend {
         output_path: Option<String>,
         initial_row_count: usize,
     ) -> Result<OpenThreeWayResponse, String> {
+        self.prime_saved_sftp_credentials(left_path);
+        self.prime_saved_sftp_credentials(base_path);
+        self.prime_saved_sftp_credentials(right_path);
+        if let Some(ref out) = output_path {
+            self.prime_saved_sftp_credentials(out);
+        }
         let left_expanded = expand_path(left_path);
         let base_expanded = expand_path(base_path);
         let right_expanded = expand_path(right_path);
@@ -883,6 +932,8 @@ impl AppBackend {
         right_dir: &str,
         options: FolderCompareOptions,
     ) -> Result<FolderDiffResult, String> {
+        self.prime_saved_sftp_credentials(left_dir);
+        self.prime_saved_sftp_credentials(right_dir);
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
         let left_display = canonical_or_display(&left_expanded);
@@ -911,6 +962,8 @@ impl AppBackend {
         sub_rel: &str,
         options: FolderCompareOptions,
     ) -> Result<freecompare_core::folder::FolderSubtreeResult, String> {
+        self.prime_saved_sftp_credentials(left_dir);
+        self.prime_saved_sftp_credentials(right_dir);
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
         freecompare_core::folder::compare_subfolder(&left_expanded, &right_expanded, sub_rel, &options)
@@ -925,6 +978,8 @@ impl AppBackend {
         action: FolderSyncActionKind,
         options: FolderCompareOptions,
     ) -> Result<FolderDiffResult, String> {
+        self.prime_saved_sftp_credentials(left_dir);
+        self.prime_saved_sftp_credentials(right_dir);
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
         apply_folder_item_operation(
@@ -1082,21 +1137,25 @@ impl AppBackend {
             }
             "list_local_dir" => {
                 let dir_path = args["dir_path"].as_str();
+                let site_id = args["site_id"].as_str().map(str::trim).filter(|s| !s.is_empty());
+                let explicit_opts = SftpConnectOptions {
+                    uri: dir_path.map(|s| s.to_string()),
+                    password: args["password"].as_str().map(|s| s.to_string()),
+                    private_key_path: args["private_key_path"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    passphrase: args["passphrase"].as_str().map(|s| s.to_string()),
+                    ..Default::default()
+                };
                 let sftp_opts: Option<SftpConnectOptions> =
-                    if dir_path.is_some_and(is_sftp_uri)
-                        && (args.get("password").is_some()
-                            || args.get("private_key_path").is_some()
-                            || args.get("passphrase").is_some())
+                    if let Some(sid) = site_id {
+                        Some(self.sftp_sites.build_connect_options(sid, Some(&explicit_opts))?)
+                    } else if dir_path.is_some_and(is_sftp_uri)
+                        && (explicit_opts.password.is_some()
+                            || explicit_opts.private_key_path.is_some()
+                            || explicit_opts.passphrase.is_some())
                     {
-                        Some(SftpConnectOptions {
-                            uri: dir_path.map(|s| s.to_string()),
-                            password: args["password"].as_str().map(|s| s.to_string()),
-                            private_key_path: args["private_key_path"]
-                                .as_str()
-                                .map(|s| s.to_string()),
-                            passphrase: args["passphrase"].as_str().map(|s| s.to_string()),
-                            ..Default::default()
-                        })
+                        Some(explicit_opts)
                     } else {
                         None
                     };
@@ -1107,10 +1166,30 @@ impl AppBackend {
                 let hosts = self.list_ssh_config_hosts();
                 Ok(json!({ "hosts": hosts }))
             }
+            "list_sftp_sites" => {
+                let sites = self.list_sftp_sites();
+                Ok(json!({ "sites": sites }))
+            }
+            "save_sftp_site" => {
+                let input: SaveSftpSiteInput = serde_json::from_value(args.clone())
+                    .map_err(|e| format!("无效的 SFTP 站点参数: {e}"))?;
+                let site = self.save_sftp_site(input)?;
+                Ok(json!({ "site": site }))
+            }
+            "delete_sftp_site" => {
+                let id = args["id"].as_str().unwrap_or("");
+                let deleted = self.delete_sftp_site(id)?;
+                Ok(json!({ "deleted": deleted }))
+            }
             "test_sftp_connection" => {
                 let opts: SftpConnectOptions =
                     serde_json::from_value(args.clone()).unwrap_or_default();
-                let res = self.test_sftp_connection(&opts)?;
+                let effective_opts = if let Some(sid) = args["site_id"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    self.sftp_sites.build_connect_options(sid, Some(&opts))?
+                } else {
+                    opts
+                };
+                let res = self.test_sftp_connection(&effective_opts)?;
                 Ok(json!(res))
             }
             "read_text_file" => {

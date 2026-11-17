@@ -5,14 +5,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { callRustRpc } from "../src/bridge.ts";
 import {
+  buildSaveSftpSiteRpcArgs,
+  buildSftpSiteDisplayUri,
   buildSftpTestRpcArgs,
   buildSftpUri,
+  type DeleteSftpSiteResponse,
   displayPathBaseName,
   isSftpUri,
   joinComparePath,
+  type ListSftpSitesResponse,
   type ListSshConfigHostsResponse,
   maskSftpPassword,
   parseSftpUri,
+  type SaveSftpSiteResponse,
   type SftpTestResultDto,
 } from "../src/utils/sftp.ts";
 
@@ -128,6 +133,17 @@ test("SFTP UI contracts: FileBrowserModal & views support SFTP profiles and path
   assert.ok(modalSrc.includes("list_ssh_config_hosts"));
   assert.ok(modalSrc.includes("test_sftp_connection"));
   assert.ok(modalSrc.includes("list_local_dir"));
+  assert.ok(modalSrc.includes("handleSaveCurrentSite"));
+  assert.ok(modalSrc.includes("save_sftp_site"));
+  assert.ok(!modalSrc.includes("maybeSaveSftpSite"));
+
+  const settingsSrc = fs.readFileSync(
+    path.join(uiSrcDir, "components/SettingsModal.tsx"),
+    "utf8"
+  );
+  assert.ok(settingsSrc.includes("list_sftp_sites"));
+  assert.ok(settingsSrc.includes("save_sftp_site"));
+  assert.ok(settingsSrc.includes("delete_sftp_site"));
 
   const folderSrc = fs.readFileSync(
     path.join(uiSrcDir, "views/FolderDiffView.tsx"),
@@ -225,6 +241,157 @@ test("SFTP RPC contract: list_ssh_config_hosts, test_sftp_connection, and list_l
     );
     assert.strictEqual(dirRes?.current_dir, "sftp://deploy@10.0.0.5/var/www");
     assert.strictEqual(dirRes?.entries[0].path, "sftp://deploy@10.0.0.5/var/www/index.html");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("buildSaveSftpSiteRpcArgs & buildSftpSiteDisplayUri preserve security boundaries", () => {
+  const createArgs = buildSaveSftpSiteRpcArgs({
+    name: "Prod Web",
+    host: "10.0.0.8",
+    port: "2222",
+    user: "deploy",
+    remotePath: "/var/www",
+    privateKeyPath: "~/.ssh/id_ed25519",
+    rememberPassword: true,
+    password: "secret!",
+  });
+  assert.strictEqual(createArgs.id, undefined);
+  assert.strictEqual(createArgs.port, 2222);
+  assert.strictEqual(createArgs.remember_password, true);
+  assert.strictEqual(createArgs.password, "secret!");
+
+  // Updating with blank password keeps existing encrypted secret on backend
+  const updateArgs = buildSaveSftpSiteRpcArgs({
+    id: "site-123",
+    name: "Prod Web",
+    host: "10.0.0.8",
+    port: "",
+    user: "deploy",
+    remotePath: "/srv/app",
+    rememberPassword: true,
+    password: "",
+  });
+  assert.strictEqual(updateArgs.id, "site-123");
+  assert.strictEqual(updateArgs.password, undefined);
+  assert.strictEqual(updateArgs.clear_password, false);
+
+  // Disabling rememberPassword omits password from payload
+  const noSaveArgs = buildSaveSftpSiteRpcArgs({
+    id: "site-123",
+    name: "Prod Web",
+    host: "10.0.0.8",
+    rememberPassword: false,
+    password: "secret!",
+  });
+  assert.strictEqual(noSaveArgs.password, undefined);
+  assert.strictEqual(noSaveArgs.remember_password, false);
+
+  // Display URI never embeds secrets
+  const displayUri = buildSftpSiteDisplayUri({
+    host: "10.0.0.8",
+    port: 2222,
+    user: "deploy",
+    remote_path: "/var/www",
+  });
+  assert.strictEqual(displayUri, "sftp://deploy@10.0.0.8:2222/var/www");
+
+  // Test RPC args forward site_id for backend secret resolution
+  const testArgs = buildSftpTestRpcArgs({
+    siteId: "site-123",
+    uri: displayUri,
+    host: "10.0.0.8",
+  });
+  assert.strictEqual(testArgs.site_id, "site-123");
+});
+
+test("SFTP site management RPC contract: list_sftp_sites, save_sftp_site, delete_sftp_site", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      cmd: string;
+      args: Record<string, unknown>;
+    };
+    if (body.cmd === "save_sftp_site") {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            site: {
+              id: "site-abc",
+              name: body.args.name,
+              host: body.args.host,
+              port: body.args.port ?? null,
+              user: body.args.user ?? null,
+              remote_path: body.args.remote_path ?? "/",
+              private_key_path: null,
+              remember_password: Boolean(body.args.remember_password),
+              has_password: Boolean(body.args.password),
+              has_passphrase: false,
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }
+    if (body.cmd === "list_sftp_sites") {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            sites: [
+              {
+                id: "site-abc",
+                name: "Prod Web",
+                host: "10.0.0.8",
+                port: 2222,
+                user: "deploy",
+                remote_path: "/var/www",
+                private_key_path: null,
+                remember_password: true,
+                has_password: true,
+                has_passphrase: false,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+              },
+            ],
+          },
+        }),
+        { status: 200 }
+      );
+    }
+    if (body.cmd === "delete_sftp_site") {
+      return new Response(
+        JSON.stringify({ ok: true, data: { deleted: body.args.id === "site-abc" } }),
+        { status: 200 }
+      );
+    }
+    return new Response(JSON.stringify({ ok: false, error: "unknown" }), { status: 400 });
+  }) as typeof fetch;
+
+  try {
+    const saved = await callRustRpc<SaveSftpSiteResponse>("save_sftp_site", {
+      name: "Prod Web",
+      host: "10.0.0.8",
+      port: 2222,
+      user: "deploy",
+      remote_path: "/var/www",
+      remember_password: true,
+      password: "secret",
+    });
+    assert.strictEqual(saved?.site.id, "site-abc");
+    assert.strictEqual(saved?.site.has_password, true);
+    assert.strictEqual((saved?.site as unknown as Record<string, unknown>).password, undefined);
+
+    const listed = await callRustRpc<ListSftpSitesResponse>("list_sftp_sites");
+    assert.strictEqual(listed?.sites.length, 1);
+    assert.strictEqual(listed?.sites[0].name, "Prod Web");
+
+    const del = await callRustRpc<DeleteSftpSiteResponse>("delete_sftp_site", { id: "site-abc" });
+    assert.strictEqual(del?.deleted, true);
   } finally {
     globalThis.fetch = origFetch;
   }

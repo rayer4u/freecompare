@@ -184,6 +184,11 @@ impl SessionManager {
         base_path: Option<String>,
         output_path: Option<String>,
     ) {
+        let left_path = sanitize_persisted_path(&left_path);
+        let right_path = sanitize_persisted_path(&right_path);
+        let base_path = base_path.map(|p| sanitize_persisted_path(&p));
+        let output_path = output_path.map(|p| sanitize_persisted_path(&p));
+
         // Skip recording ephemeral Git difftool/mergetool temporary files in `/tmp/` or `Temp`
         if is_ephemeral_git_temp_path(&left_path) || is_ephemeral_git_temp_path(&right_path) {
             return;
@@ -378,8 +383,19 @@ fn is_ephemeral_git_temp_path(p: &str) -> bool {
         || normalized.contains("_BASE_")
 }
 
+fn sanitize_persisted_path(p: &str) -> String {
+    let trimmed = p.trim();
+    if crate::sftp::is_sftp_uri(trimmed) {
+        if let Ok(loc) = crate::sftp::SftpLocation::parse(trimmed) {
+            return loc.to_uri();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn push_mru_path(list: &mut Vec<String>, path: &str) {
-    let trimmed = path.trim();
+    let sanitized = sanitize_persisted_path(path);
+    let trimmed = sanitized.trim();
     if trimmed.is_empty() || trimmed.starts_with('(') {
         return;
     }

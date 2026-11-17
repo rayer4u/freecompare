@@ -32,3 +32,6 @@ russh = { version = "0.65", default-features = false, features = ["flate2", "rin
 russh-sftp = "3.0"
 ssh2-config = "0.9"
 url = "2.5"
+ring = "0.17"
+base64 = "0.22"
+zeroize = "1.9"
