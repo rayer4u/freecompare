@@ -83,3 +83,28 @@ cargo install --path crates/cli --force
    git commit --author="Antigravity <antigravity@ai.invalid>" -m "<type>: <中文描述>"
    ```
 2. **语言与风格**：`<type>` 保留英文（`feat` / `fix` / `docs` / `chore`），正文与描述**必须使用中文**、简洁纯文本；除非用户要求，提交信息中不带版本号。
+
+---
+
+## 7. 发版与打 Tag 操作步骤
+
+当用户要求新建发布版本 Tag（如 `v0.11.0`）时，按以下标准流程执行：
+
+1. **同步更新版本号**：将新版本号（不带 `v` 前缀）同步写入以下三处文件：
+   - `Cargo.toml`（`[workspace.package].version`）
+   - `ui/package.json`（`"version"`）
+   - `src-tauri/tauri.conf.json`（`"version"`）
+2. **全量验证与本地安装**：
+   ```bash
+   npm --prefix ui test && npm --prefix ui run build
+   cargo test --workspace
+   cargo install --path crates/cli --force
+   ```
+3. **提交版本变更**：按第 6 节规范提交（需包含更新后的 `Cargo.lock`）：
+   ```bash
+   git add -A && git commit --author="Antigravity <antigravity@ai.invalid>" -m "chore: 升级版本至 vX.Y.Z"
+   ```
+4. **创建本地附注 Tag**（除非用户明确要求，不自动执行 `git push`）：
+   ```bash
+   git tag -a vX.Y.Z -m "release: vX.Y.Z"
+   ```
