@@ -133,6 +133,7 @@ export const enUS: I18nSchema = {
     all_selected_side: "Selected all {count} lines on {side} (Ctrl+C to copy)",
     readonly_no_paste: "🔒 Current side is in read-only mode (-ro), cannot paste",
     readonly_no_edit: "🔒 Current side is in read-only mode (-ro), cannot edit",
+    readonly_no_save: "🔒 Current side is read-only, cannot save",
     readonly_no_merge_right: "🔒 Right side is in read-only mode (-ro2), cannot overwrite",
     readonly_no_merge_left: "🔒 Left side is in read-only mode (-ro1), cannot overwrite",
     encoding: "Encoding",

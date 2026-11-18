@@ -131,6 +131,7 @@ export const zhCN = {
     all_selected_side: "已全选{side}全部 {count} 行 (按 Ctrl+C 即可拷贝全文)",
     readonly_no_paste: "🔒 当前侧处于只读锁定模式 (-ro)，无法粘贴覆盖",
     readonly_no_edit: "🔒 当前侧处于只读锁定模式 (-ro)，无法编辑",
+    readonly_no_save: "🔒 当前侧处于只读模式，无法保存",
     readonly_no_merge_right: "🔒 右侧处于只读锁定模式 (-ro2)，禁止覆盖修改",
     readonly_no_merge_left: "🔒 左侧处于只读锁定模式 (-ro1)，禁止覆盖修改",
     encoding: "编码",

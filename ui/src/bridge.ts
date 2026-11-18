@@ -77,6 +77,20 @@ export interface ReadTextFileResult {
   line_count: number;
   encoding: string;
   line_ending?: string;
+  readonly?: boolean;
+  doc_info?: string | null;
+}
+
+export interface OpenTwoWayResponse {
+  session_id: string;
+  left_path: string;
+  right_path: string;
+  summary: TwoWayDiffResult;
+  initial_slice: ViewportSliceDto;
+  left_readonly?: boolean;
+  right_readonly?: boolean;
+  left_doc_info?: string | null;
+  right_doc_info?: string | null;
 }
 
 export interface AppInfoDto {
@@ -231,6 +245,10 @@ export interface TwoWaySessionFormatMeta {
   rightEncoding?: string;
   leftLineEnding?: string;
   rightLineEnding?: string;
+  leftReadonly?: boolean;
+  rightReadonly?: boolean;
+  leftDocInfo?: string | null;
+  rightDocInfo?: string | null;
 }
 
 interface LocalTwoWayState {
@@ -246,6 +264,10 @@ interface LocalTwoWayState {
   rightEncoding: string;
   leftLineEnding: string;
   rightLineEnding: string;
+  leftReadonly: boolean;
+  rightReadonly: boolean;
+  leftDocInfo: string | null;
+  rightDocInfo: string | null;
   options: DiffOptions;
   rowFilter: ViewRowFilter;
   allRows: ViewportRowDto[];
@@ -282,6 +304,10 @@ function summarizeLocalTwoWay(state: LocalTwoWayState): TwoWayDiffResult {
     right_encoding: state.rightEncoding,
     left_line_ending: state.leftLineEnding,
     right_line_ending: state.rightLineEnding,
+    left_readonly: state.leftReadonly,
+    right_readonly: state.rightReadonly,
+    left_doc_info: state.leftDocInfo,
+    right_doc_info: state.rightDocInfo,
     hunks: state.hunks,
     stats: state.stats,
   };
@@ -315,6 +341,10 @@ export class CompareBackendClient {
       rightEncoding: meta?.rightEncoding || "UTF-8",
       leftLineEnding: meta?.leftLineEnding || "LF",
       rightLineEnding: meta?.rightLineEnding || "LF",
+      leftReadonly: Boolean(meta?.leftReadonly),
+      rightReadonly: Boolean(meta?.rightReadonly),
+      leftDocInfo: meta?.leftDocInfo ?? null,
+      rightDocInfo: meta?.rightDocInfo ?? null,
       options,
       rowFilter: "all",
       allRows: [],
@@ -365,6 +395,10 @@ export class CompareBackendClient {
       rightEncoding: meta?.rightEncoding || "UTF-8",
       leftLineEnding: meta?.leftLineEnding || "LF",
       rightLineEnding: meta?.rightLineEnding || "LF",
+      leftReadonly: Boolean(meta?.leftReadonly),
+      rightReadonly: Boolean(meta?.rightReadonly),
+      leftDocInfo: meta?.leftDocInfo ?? null,
+      rightDocInfo: meta?.rightDocInfo ?? null,
       options,
       rowFilter: "all",
       allRows: computed.allRows,
@@ -571,7 +605,12 @@ export class CompareBackendClient {
     sessionId: string,
     isLeft: boolean,
     newFullText: string,
-    format?: { encoding?: string; lineEnding?: string }
+    format?: {
+      encoding?: string;
+      lineEnding?: string;
+      readonly?: boolean;
+      docInfo?: string | null;
+    }
   ): TwoWayDiffResult {
     const state = localTwoWayStore.get(sessionId);
     if (!state) throw new Error("Session not found");
@@ -586,6 +625,8 @@ export class CompareBackendClient {
       state.leftDirty = true;
       if (format?.encoding) state.leftEncoding = format.encoding;
       if (format?.lineEnding) state.leftLineEnding = format.lineEnding;
+      if (format?.readonly !== undefined) state.leftReadonly = format.readonly;
+      if (format?.docInfo !== undefined) state.leftDocInfo = format.docInfo;
     } else {
       state.rightUndo.push([...state.rightLines]);
       state.rightRedo = [];
@@ -593,6 +634,8 @@ export class CompareBackendClient {
       state.rightDirty = true;
       if (format?.encoding) state.rightEncoding = format.encoding;
       if (format?.lineEnding) state.rightLineEnding = format.lineEnding;
+      if (format?.readonly !== undefined) state.rightReadonly = format.readonly;
+      if (format?.docInfo !== undefined) state.rightDocInfo = format.docInfo;
     }
     recomputeLocalTwoWay(state);
     return summarizeLocalTwoWay(state);
@@ -613,6 +656,12 @@ export class CompareBackendClient {
     const tmpLe = state.leftLineEnding;
     state.leftLineEnding = state.rightLineEnding;
     state.rightLineEnding = tmpLe;
+    const tmpRo = state.leftReadonly;
+    state.leftReadonly = state.rightReadonly;
+    state.rightReadonly = tmpRo;
+    const tmpDocInfo = state.leftDocInfo;
+    state.leftDocInfo = state.rightDocInfo;
+    state.rightDocInfo = tmpDocInfo;
     const tmpUndo = state.leftUndo;
     state.leftUndo = state.rightUndo;
     state.rightUndo = tmpUndo;
@@ -674,6 +723,10 @@ export class CompareBackendClient {
         rightEncoding: rightRes.encoding || "UTF-8",
         leftLineEnding: leftRes.line_ending || "LF",
         rightLineEnding: rightRes.line_ending || "LF",
+        leftReadonly: Boolean(leftRes.readonly),
+        rightReadonly: Boolean(rightRes.readonly),
+        leftDocInfo: leftRes.doc_info ?? null,
+        rightDocInfo: rightRes.doc_info ?? null,
       }
     );
   }

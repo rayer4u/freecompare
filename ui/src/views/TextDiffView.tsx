@@ -195,6 +195,18 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
     )
   );
 
+  const isLeftReadonly = createMemo(
+    () => Boolean(props.leftReadonly) || Boolean(summary().left_readonly)
+  );
+  const isRightReadonly = createMemo(
+    () => Boolean(props.rightReadonly) || Boolean(summary().right_readonly)
+  );
+  const isSideReadonly = (isLeft: boolean) =>
+    isLeft ? isLeftReadonly() : isRightReadonly();
+  const isFocusedReadonly = createMemo(() =>
+    focusedSide() === "left" ? isLeftReadonly() : isRightReadonly()
+  );
+
   const [versionTick, setVersionTick] = createSignal(0);
   const [activeHunkIdx, setActiveHunkIdx] = createSignal<number>(0);
   const [selectedRow, setSelectedRow] = createSignal<ViewportRowDto | null>(null);
@@ -371,11 +383,11 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleMergeHunk = (hunkId: number, direction: MergeDirection) => {
-    if (direction === "left_to_right" && props.rightReadonly) {
+    if (direction === "left_to_right" && isRightReadonly()) {
       showToast(t("text_diff.readonly_no_merge_right"));
       return;
     }
-    if (direction === "right_to_left" && props.leftReadonly) {
+    if (direction === "right_to_left" && isLeftReadonly()) {
       showToast(t("text_diff.readonly_no_merge_left"));
       return;
     }
@@ -390,7 +402,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleEditLine = (isLeft: boolean, lineNo1Based: number, newText: string) => {
-    if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
+    if (isSideReadonly(isLeft)) {
       showToast(t("text_diff.readonly_no_edit"));
       return;
     }
@@ -411,7 +423,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handlePasteTextToSide = (isLeft: boolean, text: string) => {
-    if ((isLeft && props.leftReadonly) || (!isLeft && props.rightReadonly)) {
+    if (isSideReadonly(isLeft)) {
       showToast(t("text_diff.readonly_no_paste"));
       return;
     }
@@ -510,18 +522,30 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
   };
 
   const handleUndo = (isLeft: boolean) => {
+    if (isSideReadonly(isLeft)) {
+      showToast(t("text_diff.readonly_no_edit"));
+      return;
+    }
     const nextSummary = CompareBackendClient.undoSide(props.sessionId, isLeft);
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
   };
 
   const handleRedo = (isLeft: boolean) => {
+    if (isSideReadonly(isLeft)) {
+      showToast(t("text_diff.readonly_no_edit"));
+      return;
+    }
     const nextSummary = CompareBackendClient.redoSide(props.sessionId, isLeft);
     setSummary(nextSummary);
     setVersionTick((t) => t + 1);
   };
 
   const handleSaveSide = async (isLeft: boolean) => {
+    if (isSideReadonly(isLeft)) {
+      showToast(t("text_diff.readonly_no_save"));
+      return;
+    }
     const path = (isLeft ? leftPath() : rightPath()).trim();
     const content = CompareBackendClient.getSideFullText(props.sessionId, isLeft);
     const encoding = isLeft ? summary().left_encoding : summary().right_encoding;
@@ -588,7 +612,12 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           props.sessionId,
           isLeft,
           res.content,
-          { encoding: res.encoding, lineEnding: res.line_ending }
+          {
+            encoding: res.encoding,
+            lineEnding: res.line_ending,
+            readonly: Boolean(res.readonly),
+            docInfo: res.doc_info ?? null,
+          }
         );
         setSummary(CompareBackendClient.markSideSaved(props.sessionId, isLeft));
         setVersionTick((t) => t + 1);
@@ -1140,8 +1169,9 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
         <div class="bc-toolbar-group">
           <button
             class={`bc-tool-btn ${summary().left_dirty || summary().right_dirty ? "dirty-accent" : ""}`}
+            disabled={isFocusedReadonly()}
             onClick={() => handleSaveSide(focusedSide() === "left")}
-            title={t("text_diff.save_tip")}
+            title={isFocusedReadonly() ? t("text_diff.readonly_no_save") : t("text_diff.save_tip")}
           >
             {t("text_diff.save")}
           </button>
@@ -1217,8 +1247,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <span class="side-badge left">
             {props.leftTitle ? `LEFT: ${props.leftTitle}` : "LEFT"}
           </span>
-          <Show when={props.leftReadonly}>
-            <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
+          <Show when={isLeftReadonly()}>
+            <span class="meta-tag" title={summary().left_doc_info ?? t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
           </Show>
           <Show when={isSftpUri(leftPath())}>
             <span class="meta-tag sftp-tag">{t("text_diff.sftp_badge")}</span>
@@ -1261,8 +1291,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           <span class="side-badge right">
             {props.rightTitle ? `RIGHT: ${props.rightTitle}` : "RIGHT"}
           </span>
-          <Show when={props.rightReadonly}>
-            <span class="meta-tag" title={t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
+          <Show when={isRightReadonly()}>
+            <span class="meta-tag" title={summary().right_doc_info ?? t("text_diff.readonly_lock")}>{t("text_diff.readonly_tag")}</span>
           </Show>
           <Show when={isSftpUri(rightPath())}>
             <span class="meta-tag sftp-tag">{t("text_diff.sftp_badge")}</span>
@@ -1505,6 +1535,8 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
           tabWidth={tabWidth()}
           showWhitespaceGlyphs={showWhitespaceGlyphs()}
           syntaxHighlighting={syntaxHighlighting()}
+          leftReadonly={isLeftReadonly()}
+          rightReadonly={isRightReadonly()}
           fetchSlice={fetchSlice}
           onFocusSide={(side) => {
             setFocusedSide(side);
@@ -1678,7 +1710,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
             </span>
           </Show>
           <span class="statusbar-item" title={t("text_diff.encoding")}>
-            {summary().left_encoding}/{summary().left_line_ending} ↔ {summary().right_encoding}/{summary().right_line_ending}
+            {summary().left_doc_info || `${summary().left_encoding}/${summary().left_line_ending}`} ↔ {summary().right_doc_info || `${summary().right_encoding}/${summary().right_line_ending}`}
           </span>
         </div>
 
@@ -1727,7 +1759,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               <Show when={hunk()}>
                 {(h) => (
                   <>
-                    <Show when={!props.rightReadonly}>
+                    <Show when={!isRightReadonly()}>
                       <div
                         class="ctx-item"
                         onClick={() => {
@@ -1739,7 +1771,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                         <span class="ctx-shortcut">Alt+→</span>
                       </div>
                     </Show>
-                    <Show when={!props.leftReadonly}>
+                    <Show when={!isLeftReadonly()}>
                       <div
                         class="ctx-item"
                         onClick={() => {
@@ -1756,7 +1788,7 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
                 )}
               </Show>
 
-              <Show when={!(isLeft() ? props.leftReadonly : props.rightReadonly)}>
+              <Show when={!isSideReadonly(isLeft())}>
                 <div
                   class="ctx-item"
                   onClick={() => {

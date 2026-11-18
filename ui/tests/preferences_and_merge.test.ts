@@ -500,10 +500,10 @@ test("TextDiffView context menu readonly/null-row guards & no global swap/reload
   const menuBlock = menuMatch[0];
 
   // Merge actions gated on target side writability
-  assert.match(menuBlock, /<Show when=\{!props\.rightReadonly\}>/);
-  assert.match(menuBlock, /<Show when=\{!props\.leftReadonly\}>/);
+  assert.match(menuBlock, /<Show when=\{!isRightReadonly\(\)\}>/);
+  assert.match(menuBlock, /<Show when=\{!isLeftReadonly\(\)\}>/);
   // Edit/undo/redo/save gated on active side writability
-  assert.match(menuBlock, /<Show when=\{!\(isLeft\(\) \? props\.leftReadonly : props\.rightReadonly\)\}>/);
+  assert.match(menuBlock, /<Show when=\{!isSideReadonly\(isLeft\(\)\)\}>/);
   // Copy line gated on non-null text on that side
   assert.match(
     menuBlock,

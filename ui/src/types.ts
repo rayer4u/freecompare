@@ -69,6 +69,10 @@ export interface TwoWayDiffResult {
   right_encoding: string;
   left_line_ending: string;
   right_line_ending: string;
+  left_readonly?: boolean;
+  right_readonly?: boolean;
+  left_doc_info?: string | null;
+  right_doc_info?: string | null;
   hunks: TwoWayHunk[];
   stats: DiffStats;
 }

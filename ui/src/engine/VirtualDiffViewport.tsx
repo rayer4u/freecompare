@@ -26,6 +26,8 @@ interface VirtualDiffViewportProps {
   tabWidth?: number;
   showWhitespaceGlyphs?: boolean;
   syntaxHighlighting?: boolean;
+  leftReadonly?: boolean;
+  rightReadonly?: boolean;
   fetchSlice: (startRow: number, count: number) => ViewportRowDto[];
   onFocusSide: (side: "left" | "right") => void;
   onPasteToSide: (isLeft: boolean, pastedText: string) => void;
@@ -244,6 +246,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                         props.onContextMenu?.(e, row, "left");
                       }}
                       onDblClick={() => {
+                        if (props.leftReadonly) return;
                         if (row.left_line_no !== null && row.left_text !== null) {
                           setEditingCell({
                             isLeft: true,
@@ -354,26 +357,30 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                     }`}
                     style={{ top: `${topPx}px` }}
                   >
-                    <button
-                      class="gutter-copy-btn copy-right"
-                      title={t("text_diff.copy_to_right_tip")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onMergeHunk(hunk.id, "left_to_right");
-                      }}
-                    >
-                      »
-                    </button>
-                    <button
-                      class="gutter-copy-btn copy-left"
-                      title={t("text_diff.copy_to_left_tip")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onMergeHunk(hunk.id, "right_to_left");
-                      }}
-                    >
-                      «
-                    </button>
+                    <Show when={!props.rightReadonly}>
+                      <button
+                        class="gutter-copy-btn copy-right"
+                        title={t("text_diff.copy_to_right_tip")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onMergeHunk(hunk.id, "left_to_right");
+                        }}
+                      >
+                        »
+                      </button>
+                    </Show>
+                    <Show when={!props.leftReadonly}>
+                      <button
+                        class="gutter-copy-btn copy-left"
+                        title={t("text_diff.copy_to_left_tip")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onMergeHunk(hunk.id, "right_to_left");
+                        }}
+                      >
+                        «
+                      </button>
+                    </Show>
                   </div>
                 );
               }}
@@ -454,6 +461,7 @@ export const VirtualDiffViewport: Component<VirtualDiffViewportProps> = (props) 
                         props.onContextMenu?.(e, row, "right");
                       }}
                       onDblClick={() => {
+                        if (props.rightReadonly) return;
                         if (row.right_line_no !== null && row.right_text !== null) {
                           setEditingCell({
                             isLeft: false,
