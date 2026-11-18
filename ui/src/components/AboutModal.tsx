@@ -185,9 +185,6 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
         </div>
 
         <div class="about-modal-footer">
-          <Show when={toast()}>
-            <span class="about-toast-msg">✅ {toast()}</span>
-          </Show>
           <div class="about-footer-spacer" />
           <button
             class="modal-select-btn"
@@ -201,6 +198,10 @@ export const AboutModal: Component<AboutModalProps> = (props) => {
             {t("about.close")}
           </button>
         </div>
+
+        <Show when={toast()}>
+          <div class="floating-toast">{toast()}</div>
+        </Show>
       </div>
     </div>
   );

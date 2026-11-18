@@ -1874,18 +1874,6 @@ body {
   border: 1px solid rgba(56, 189, 248, 0.35);
 }
 
-.sftp-hint-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 5px 14px;
-  background: rgba(56, 189, 248, 0.1);
-  border-bottom: 1px solid rgba(56, 189, 248, 0.28);
-  font-size: 12px;
-  color: var(--text-primary);
-}
-
 .modal-file-list {
   flex: 1;
   overflow-y: auto;
@@ -2217,15 +2205,6 @@ body {
 
 .about-footer-spacer {
   flex: 1;
-}
-
-.about-toast-msg {
-  font-size: 12px;
-  color: #22c55e;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .about-loading {

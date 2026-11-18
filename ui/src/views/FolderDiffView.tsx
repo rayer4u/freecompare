@@ -958,6 +958,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           </button>
           <button
             class={`bc-tool-btn ${compareMode() === "hash" ? "active" : ""}`}
+            title={(isSftpUri(leftInput()) || isSftpUri(rightInput())) && compareMode() === "hash" ? t("folder_diff.sftp_fast_hint") : undefined}
             onClick={() => {
               const next = compareMode() === "hash" ? "fast" : "hash";
               setCompareMode(next);
@@ -1064,26 +1065,6 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           </button>
         </div>
       </div>
-
-      <Show when={(isSftpUri(leftInput()) || isSftpUri(rightInput())) && compareMode() === "hash"}>
-        <div class="sftp-hint-bar">
-          <span>{t("folder_diff.sftp_fast_hint")}</span>
-          <button
-            class="bc-tool-btn"
-            onClick={() => {
-              setCompareMode("fast");
-              callRustRpc("update_user_preferences", {
-                folder_compare_mode: "fast",
-              }).catch(() => {});
-              if (leftInput().trim() && rightInput().trim()) {
-                scanRealFolders(leftInput(), rightInput());
-              }
-            }}
-          >
-            {t("folder_diff.sftp_switch_fast")}
-          </button>
-        </div>
-      </Show>
 
       {/* Side-by-Side Synchronized Folder TreeGrid */}
       <div class="folder-tree-container">
