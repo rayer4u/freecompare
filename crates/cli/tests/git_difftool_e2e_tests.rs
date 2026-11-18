@@ -327,25 +327,17 @@ fn test_fcompare_guard_exempt_paths_and_noop_edit_allow() {
     let bin = env!("CARGO_BIN_EXE_fcompare");
     let dir = tempdir().unwrap();
 
-    // 1. `.git` and `.agents` internal paths are automatically allowed without launching UI
-    for exempt_path in [".git/COMMIT_EDITMSG", ".agents/hooks.json"] {
+    let run_guard = |payload: Value| {
         let mut child = Command::new(bin)
             .arg("guard")
+            .current_dir(dir.path())
+            .env_remove("FCOMPARE_GUARD_DISABLED")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn fcompare guard");
 
-        let payload = serde_json::json!({
-            "toolCall": {
-                "name": "write_file",
-                "args": {
-                    "Path": exempt_path,
-                    "Content": "test"
-                }
-            }
-        });
         child
             .stdin
             .take()
@@ -357,18 +349,24 @@ fn test_fcompare_guard_exempt_paths_and_noop_edit_allow() {
         assert!(output.status.success());
         let out_json: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(out_json["decision"], "allow");
+    };
+
+    // 1. `.git` and `.agents` internal paths are automatically allowed without launching UI
+    for exempt_path in [".git/COMMIT_EDITMSG", ".agents/hooks.json"] {
+        run_guard(serde_json::json!({
+            "toolCall": {
+                "name": "write_file",
+                "args": {
+                    "Path": exempt_path,
+                    "Content": "test"
+                }
+            }
+        }));
     }
 
     // 2. Temp dir file is automatically allowed without launching UI
     let temp_file = dir.path().join("temp_scratch.txt");
-    let mut child = Command::new(bin)
-        .arg("guard")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn fcompare guard for temp file");
-    let payload = serde_json::json!({
+    run_guard(serde_json::json!({
         "toolCall": {
             "name": "write_file",
             "args": {
@@ -376,17 +374,7 @@ fn test_fcompare_guard_exempt_paths_and_noop_edit_allow() {
                 "Content": "hello"
             }
         }
-    });
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let out_json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(out_json["decision"], "allow");
+    }));
 }
 
 trait WaitTimeoutExt {
