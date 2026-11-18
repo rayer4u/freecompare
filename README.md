@@ -58,6 +58,15 @@ cargo install --path crates/cli --locked --force
 fcompare --install-git
 ```
 
+### Release 各版本区别
+
+| 压缩包 | 产物 | 运行方式与依赖 | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| `freecompare-windows-x86_64-desktop.zip` | `FreeCompare.exe` | **Tauri 原生窗口**（使用 Windows 10/11 内置 Edge WebView2，**不依赖外部浏览器**，不支持 Win7） | 偏好独立原生桌面窗口、不希望依赖 Chrome/Edge 进程的 Windows 用户 |
+| `freecompare-windows-x86_64.zip` | `fcompare.exe` | **CLI + 外部浏览器 App 模式**（本地 HTTP 服务并拉起 Chrome/Edge `--app`） | `git difftool` / `mergetool`、`-qc`、`--cli` 终端摘要及日常命令行比对 |
+| `freecompare-linux-x86_64.tar.gz` | `fcompare` | **CLI + 外部浏览器 App 模式**（纯静态/最小依赖，无需安装 `webkit2gtk`） | Linux 桌面与服务器终端（支持 `--cli` 与 `--no-open-window`） |
+| `freecompare-macos-arm64.tar.gz` / `x86_64.tar.gz` | `fcompare` | **CLI + 外部浏览器 App 模式** | Apple Silicon / Intel Mac 终端与 Git 集成 |
+
 ## AI 编程审查守卫 (Antigravity CLI / agy 集成)
 
 FreeCompare 提供了原生的 `fcompare guard` 命令，用作 Antigravity (agy) 的生命周期钩子（Lifecycle Hooks），在 AI 试图修改文件前进行可视化审查与守卫。

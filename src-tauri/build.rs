@@ -39,4 +39,7 @@ fn main() {
     println!("cargo:rustc-env=FC_TARGET_TRIPLE={target}");
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
+
+    #[cfg(feature = "desktop")]
+    tauri_build::build();
 }

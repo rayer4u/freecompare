@@ -51,6 +51,18 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact_name: freecompare-windows-x86_64
             archive_ext: zip
+            package: freecompare-cli
+            features: ""
+            bin_name: fcompare.exe
+            dist_bin_name: fcompare.exe
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: freecompare-windows-x86_64-desktop
+            archive_ext: zip
+            package: freecompare-app
+            features: desktop
+            bin_name: freecompare-app.exe
+            dist_bin_name: FreeCompare.exe
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: freecompare-macos-arm64
@@ -79,8 +91,14 @@ jobs:
           npm install
           npm run build
 
-      - name: Build Release Binary (fcompare)
-        run: cargo build --release -p freecompare-cli --target ${{ matrix.target }}
+      - name: Build Release Binary (${{ matrix.package || 'freecompare-cli' }})
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo build --release -p ${{ matrix.package || 'freecompare-cli' }} --features ${{ matrix.features }} --target ${{ matrix.target }}
+          else
+            cargo build --release -p ${{ matrix.package || 'freecompare-cli' }} --target ${{ matrix.target }}
+          fi
 
       - name: Package Portable Archive (Unix)
         if: matrix.os != 'windows-latest'
@@ -95,7 +113,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-pkg | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/fcompare.exe dist-pkg/
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist-pkg/${{ matrix.dist_bin_name }}"
           Copy-Item README.md dist-pkg/
           Compress-Archive -Path dist-pkg/* -DestinationPath ${{ matrix.artifact_name }}.zip
 

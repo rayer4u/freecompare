@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(not(debug_assertions), feature = "desktop"),
+    windows_subsystem = "windows"
+)]
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn rpc_invoke(
