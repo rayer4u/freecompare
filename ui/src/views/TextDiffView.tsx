@@ -1727,15 +1727,6 @@ export const TextDiffView: Component<TextDiffViewProps> = (props) => {
               📂 {Math.max(1, currentSiblingIdx() + 1)} / {props.siblingFiles?.length ?? 0}
             </span>
           </Show>
-          <Show when={!isReviewMode()}>
-            <button
-              class="statusbar-exit-btn"
-              onClick={tryCloseOrExit}
-              title={t("text_diff.exit_btn_tip")}
-            >
-              {t("text_diff.exit_btn")}
-            </button>
-          </Show>
         </div>
       </footer>
 

@@ -1403,15 +1403,7 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <span class="stat-pill del">{t("folder_diff.stat_right", { count: folderData().stats.right_only_items })}</span>
           <span class="stat-pill eq">{t("folder_diff.stat_same", { count: folderData().stats.equal_items })}</span>
         </div>
-        <div class="statusbar-right">
-          <button
-            class="statusbar-exit-btn"
-            onClick={props.onCloseOrExit}
-            title={t("text_diff.exit_btn_tip")}
-          >
-            {t("text_diff.exit_btn")}
-          </button>
-        </div>
+        <div class="statusbar-right"></div>
       </footer>
 
       <Show when={browserSide()}>
@@ -1542,7 +1534,7 @@ const FolderRow: Component<{
       <div class="folder-col-center" onClick={(e) => e.stopPropagation()}>
         <Show when={!props.entry.is_dir && props.entry.status !== "equal" && props.entry.status !== "right_only"}>
           <button
-            class="gutter-copy-btn"
+            class="gutter-copy-btn folder-copy-right"
             title={t("folder_diff.copy_right_tip")}
             onClick={(e) => {
               e.stopPropagation();
@@ -1565,7 +1557,7 @@ const FolderRow: Component<{
         </span>
         <Show when={!props.entry.is_dir && props.entry.status !== "equal" && props.entry.status !== "left_only"}>
           <button
-            class="gutter-copy-btn"
+            class="gutter-copy-btn folder-copy-left"
             title={t("folder_diff.copy_left_tip")}
             onClick={(e) => {
               e.stopPropagation();
