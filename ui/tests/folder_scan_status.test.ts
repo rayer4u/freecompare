@@ -19,7 +19,7 @@ import type { FolderDiffResult } from "../src/types.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uiSrcDir = path.resolve(__dirname, "../src");
 
-test("FolderScanController: discards stale scanSeq response and cancels superseded scan", async () => {
+test("FolderScanController: rejects re-entrant scan with busy status without interrupting active scan", async () => {
   let scanning = false;
   let progress: FolderScanProgress = { dirsScanned: 0, itemsFound: 0 };
   const cancelledIds: string[] = [];
@@ -47,43 +47,106 @@ test("FolderScanController: discards stale scanSeq response and cancels supersed
   const scan1Id = controller.getActiveScanId();
   assert.ok(scan1Id);
   assert.equal(scanning, true);
+  assert.equal(controller.isBusy(), true);
 
-  // Start second scan before first finishes
+  assert.equal(
+    controller.handleProgress({ scan_id: scan1Id, dirs_scanned: 5, items_found: 42 }),
+    true
+  );
+  assert.deepStrictEqual(progress, { dirsScanned: 5, itemsFound: 42 });
+
+  // Attempt second scan while first is active -> must reject as busy without cancelling scan1
+  let secondExecuteCalled = false;
+  const out2 = await controller.runScan(async () => {
+    secondExecuteCalled = true;
+    return "should-not-run";
+  });
+  assert.deepStrictEqual(out2, { status: "busy" });
+  assert.equal(secondExecuteCalled, false);
+  assert.deepStrictEqual(cancelledIds, []);
+  assert.equal(controller.getActiveScanId(), scan1Id);
+  assert.equal(scanning, true);
+  assert.equal(controller.isBusy(), true);
+  assert.deepStrictEqual(progress, { dirsScanned: 5, itemsFound: 42 });
+
+  // Unrelated scan_id progress is still ignored
+  assert.equal(
+    controller.handleProgress({ scan_id: "other-scan", dirs_scanned: 99, items_found: 999 }),
+    false
+  );
+  assert.deepStrictEqual(progress, { dirsScanned: 5, itemsFound: 42 });
+
+  // Resolve active scan1 -> completes and clears scanning
+  resolvers[0].resolve("first-result");
+  const out1 = await p1;
+  assert.deepStrictEqual(out1, { status: "completed", result: "first-result" });
+  assert.equal(scanning, false);
+  assert.equal(controller.isBusy(), false);
+  assert.equal(controller.getActiveScanId(), null);
+
+  // Now a new scan can start
+  const out3 = await controller.runScan(async () => "next-result");
+  assert.deepStrictEqual(out3, { status: "completed", result: "next-result" });
+});
+
+test("FolderScanController: must cancel active scan before running a new scan", async () => {
+  let scanning = false;
+  const cancelledIds: string[] = [];
+  let rejectFirst: ((err: Error) => void) | null = null;
+  let resolveSecond: ((val: string) => void) | null = null;
+
+  const controller = createFolderScanController({
+    onScanningChange: (v) => {
+      scanning = v;
+    },
+    onProgressChange: () => {},
+    cancelRpc: (id) => {
+      cancelledIds.push(id);
+    },
+    idPrefix: "sub",
+  });
+
+  const p1 = controller.runScan(
+    () =>
+      new Promise<string>((_, reject) => {
+        rejectFirst = reject;
+      })
+  );
+  const scan1Id = controller.getActiveScanId();
+  assert.ok(scan1Id);
+
+  // Re-entrant attempt before cancelling is rejected
+  const busyOut = await controller.runScan(async () => "blocked");
+  assert.deepStrictEqual(busyOut, { status: "busy" });
+  assert.deepStrictEqual(cancelledIds, []);
+
+  // Cancel active scan -> now a new scan can be started
+  const cancelledId = controller.cancelActiveScan();
+  assert.equal(cancelledId, scan1Id);
+  assert.deepStrictEqual(cancelledIds, [scan1Id]);
+  assert.equal(scanning, false);
+
   const p2 = controller.runScan(
-    (scanId) =>
+    () =>
       new Promise<string>((resolve) => {
-        resolvers.push({ scanId, resolve });
+        resolveSecond = resolve;
       })
   );
   const scan2Id = controller.getActiveScanId();
   assert.ok(scan2Id);
   assert.notEqual(scan1Id, scan2Id);
-  assert.deepStrictEqual(cancelledIds, [scan1Id]);
   assert.equal(scanning, true);
 
-  // Progress for stale scan1 must be ignored; progress for scan2 must apply
-  assert.equal(
-    controller.handleProgress({ scan_id: scan1Id, dirs_scanned: 99, items_found: 999 }),
-    false
-  );
-  assert.deepStrictEqual(progress, { dirsScanned: 0, itemsFound: 0 });
-  assert.equal(
-    controller.handleProgress({ scan_id: scan2Id, dirs_scanned: 5, items_found: 42 }),
-    true
-  );
-  assert.deepStrictEqual(progress, { dirsScanned: 5, itemsFound: 42 });
-
-  // Resolve stale scan1 first -> must be discarded and keep scanning=true
-  resolvers[0].resolve("old-result");
+  // Late rejection of scan1 must not clobber scan2
+  rejectFirst!(new Error("SCAN_CANCELLED"));
   const out1 = await p1;
   assert.equal(out1.status, "stale");
   assert.equal(scanning, true);
   assert.equal(controller.getActiveScanId(), scan2Id);
 
-  // Resolve active scan2 -> completes and clears scanning
-  resolvers[1].resolve("new-result");
+  resolveSecond!("after-cancel");
   const out2 = await p2;
-  assert.deepStrictEqual(out2, { status: "completed", result: "new-result" });
+  assert.deepStrictEqual(out2, { status: "completed", result: "after-cancel" });
   assert.equal(scanning, false);
   assert.equal(controller.getActiveScanId(), null);
 });
@@ -282,4 +345,30 @@ test("i18n & FolderDiffView statusbar contracts: progress, truncated hint, expan
   assert.ok(folderViewSrc.includes("statusbar-scan-progress"));
   assert.ok(folderViewSrc.includes("statusbar-cancel-btn"));
   assert.ok(folderViewSrc.includes("statusbar-truncated"));
+
+  // Mutual exclusion & compare_subfolder progress/cancel/recursive-expand contracts
+  assert.equal(
+    zhCN.folder_diff.busy_reject,
+    "当前已有扫描操作正在进行，请先取消后再运行"
+  );
+  assert.ok(
+    enUsSrc.includes(
+      'busy_reject: "A scan operation is already in progress. Please cancel it first."'
+    )
+  );
+  assert.ok(folderViewSrc.includes('t("folder_diff.busy_reject")'));
+  assert.ok(folderViewSrc.includes("scan_id: scanId"));
+  assert.match(
+    folderViewSrc,
+    /fetchSubfolder\s*=\s*\(subRel:\s*string,\s*recursive\s*=\s*false,\s*scanId\?:\s*string\)/
+  );
+  assert.ok(folderViewSrc.includes("rollbackScannedDir(subRel)"));
+  assert.match(
+    folderViewSrc,
+    /const refreshSubfolder[\s\S]*scanController\.runScan\(\(scanId\) =>\s*fetchSubfolder\(subRel, recursive, scanId\)/
+  );
+  assert.match(
+    folderViewSrc,
+    /const expandAll = async \(\) => \{\s*if \(isScanning\(\)\) \{\s*notify\(t\("folder_diff\.busy_reject"\)\);\s*return;\s*\}/
+  );
 });

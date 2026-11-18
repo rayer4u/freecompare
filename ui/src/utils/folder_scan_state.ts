@@ -10,6 +10,7 @@ export type FolderScanOutcome<T> =
   | { status: "empty" }
   | { status: "cancelled" }
   | { status: "stale" }
+  | { status: "busy" }
   | { status: "error"; error: unknown };
 
 export interface FolderScanControllerCallbacks {
@@ -28,8 +29,9 @@ export function isScanCancelledError(err: unknown): boolean {
 }
 
 /**
- * Coordinates folder scan lifecycle with monotonic `scanSeq` stale-response discarding,
- * cooperative cancellation of superseded in-flight scans, and `scan_id`-filtered progress.
+ * Coordinates folder scan lifecycle with strict single-flight mutual exclusion,
+ * monotonic `scanSeq` stale-response discarding, explicit cancellation, and
+ * `scan_id`-filtered progress.
  */
 export function createFolderScanController(
   callbacks: FolderScanControllerCallbacks
@@ -41,6 +43,7 @@ export function createFolderScanController(
 
   const getActiveScanId = () => activeScanId;
   const getScanSeq = () => scanSeq;
+  const isBusy = () => activeScanId !== null;
 
   const cancelActiveScan = (): string | null => {
     const id = activeScanId;
@@ -67,7 +70,7 @@ export function createFolderScanController(
     execute: (scanId: string) => Promise<T | null>
   ): Promise<FolderScanOutcome<T>> => {
     if (activeScanId) {
-      Promise.resolve(callbacks.cancelRpc(activeScanId)).catch(() => {});
+      return { status: "busy" };
     }
 
     const seq = ++scanSeq;
@@ -106,5 +109,6 @@ export function createFolderScanController(
     handleProgress,
     getActiveScanId,
     getScanSeq,
+    isBusy,
   };
 }

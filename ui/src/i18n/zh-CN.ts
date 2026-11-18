@@ -290,6 +290,7 @@ export const zhCN = {
     truncated_hint: "(已截断至 30,000 项)",
     scanning_progress: "正在扫描 · 已发现 {items} 项 / {dirs} 目录",
     cancel_scan: "取消",
+    busy_reject: "当前已有扫描操作正在进行，请先取消后再运行",
   },
   file_browser: {
     up: "⬆ 上级",

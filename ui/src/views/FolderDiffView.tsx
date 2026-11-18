@@ -125,6 +125,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       notify(t("folder_diff.path_left_placeholder"));
       return false;
     }
+    if (isScanning()) {
+      notify(t("folder_diff.busy_reject"));
+      return false;
+    }
 
     const outcome = await scanController.runScan((scanId) =>
       callRustRpc<FolderDiffResult>("scan_folder_diff", {
@@ -140,6 +144,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       })
     );
 
+    if (outcome.status === "busy") {
+      notify(t("folder_diff.busy_reject"));
+      return false;
+    }
     if (outcome.status === "stale" || outcome.status === "cancelled") {
       return false;
     }
@@ -206,11 +214,12 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     return true;
   };
 
-  const fetchSubfolder = (subRel: string, recursive = false) =>
+  const fetchSubfolder = (subRel: string, recursive = false, scanId?: string) =>
     callRustRpc<FolderSubtreeResult>("compare_subfolder", {
       left_dir: folderData().left_root,
       right_dir: folderData().right_root,
       sub_rel: subRel,
+      ...(scanId ? { scan_id: scanId } : {}),
       options: {
         mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
         ignore_case_names: false,
@@ -219,61 +228,95 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       },
     });
 
+  const rollbackScannedDir = (subRel: string) => {
+    setScannedDirs((prev) => {
+      const next = new Set(prev);
+      next.delete(subRel);
+      return next;
+    });
+  };
+
   const refreshSubfolder = async (
     subRel: string,
     recursive = false,
     silent = false
-  ) => {
+  ): Promise<boolean> => {
+    if (isScanning()) {
+      if (!silent) {
+        notify(t("folder_diff.busy_reject"));
+      }
+      return false;
+    }
+
     setScannedDirs((prev) => new Set(prev).add(subRel));
-    try {
-      const res = await fetchSubfolder(subRel, recursive);
-      if (res) {
-        setFolderData((prev) => {
-          const updated = mergeSubtreeEntries(prev.entries, res);
-          return {
-            ...prev,
-            entries: updated,
-            stats: recomputeFolderStats(updated),
-          };
-        });
+    const outcome = await scanController.runScan((scanId) =>
+      fetchSubfolder(subRel, recursive, scanId)
+    );
 
-        // Expand the subfolder
-        setCollapsedDirs((prev) => {
-          const next = new Set(prev);
-          next.delete(res.relative_path);
-          // When scanning immediate children, collapse deeper nested subfolders by default
-          for (const item of res.entries) {
-            if (item.is_dir) {
-              next.add(item.relative_path);
-            }
+    if (outcome.status === "busy") {
+      rollbackScannedDir(subRel);
+      if (!silent) {
+        notify(t("folder_diff.busy_reject"));
+      }
+      return false;
+    }
+    if (outcome.status === "stale" || outcome.status === "cancelled") {
+      rollbackScannedDir(subRel);
+      return false;
+    }
+    if (outcome.status === "empty") {
+      rollbackScannedDir(subRel);
+      if (!silent) notify(t("folder_diff.err_scan"));
+      return false;
+    }
+    if (outcome.status === "error") {
+      rollbackScannedDir(subRel);
+      const err = outcome.error;
+      if (!silent) notify(err instanceof Error ? err.message : String(err));
+      return false;
+    }
+
+    const res = outcome.result;
+    setFolderData((prev) => {
+      const updated = mergeSubtreeEntries(prev.entries, res);
+      return {
+        ...prev,
+        entries: updated,
+        stats: recomputeFolderStats(updated),
+      };
+    });
+
+    // Expand the subfolder
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      next.delete(res.relative_path);
+      // When scanning immediate children, collapse deeper nested subfolders by default.
+      // When recursive === true, expand the entire subtree directly.
+      if (!recursive) {
+        for (const item of res.entries) {
+          if (item.is_dir) {
+            next.add(item.relative_path);
           }
-          return next;
-        });
-
-        if (!silent) {
-          notify(
-            t("folder_diff.scan_subdir_done", {
-              path: res.relative_path,
-              count: res.entries.length,
-            })
-          );
         }
       } else {
-        setScannedDirs((prev) => {
-          const next = new Set(prev);
-          next.delete(subRel);
-          return next;
-        });
-        if (!silent) notify(t("folder_diff.err_scan"));
+        for (const item of res.entries) {
+          if (item.is_dir) {
+            next.delete(item.relative_path);
+          }
+        }
       }
-    } catch (err) {
-      setScannedDirs((prev) => {
-        const next = new Set(prev);
-        next.delete(subRel);
-        return next;
-      });
-      if (!silent) notify(err instanceof Error ? err.message : String(err));
+      return next;
+    });
+
+    if (!silent) {
+      notify(
+        t("folder_diff.scan_subdir_done", {
+          path: res.relative_path,
+          count: res.entries.length,
+        })
+      );
     }
+    return true;
   };
 
   const handleCompareSubfolder = (subRel: string, recursive = false) =>
@@ -709,6 +752,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const expandAll = async () => {
+    if (isScanning()) {
+      notify(t("folder_diff.busy_reject"));
+      return;
+    }
     // If not in recursive full scan mode yet, trigger recursive scan to fetch all nested items
     if (!isRecursiveScan()) {
       setIsRecursiveScan(true);
@@ -730,6 +777,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const handleSwapFolders = () => {
+    if (isScanning()) {
+      notify(t("folder_diff.busy_reject"));
+      return;
+    }
     const l = leftInput();
     const r = rightInput();
     setLeftInput(r);
@@ -777,6 +828,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     direction: "left_to_right" | "right_to_left",
     targetPathOrList?: string | string[]
   ) => {
+    if (isScanning()) {
+      notify(t("folder_diff.busy_reject"));
+      return;
+    }
     const rawList = Array.isArray(targetPathOrList)
       ? targetPathOrList
       : [targetPathOrList ?? selectedRelPath() ?? ""];
@@ -871,6 +926,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     side: "left" | "right",
     entryOrList: FolderEntryDto | FolderEntryDto[]
   ) => {
+    if (isScanning()) {
+      notify(t("folder_diff.busy_reject"));
+      return;
+    }
     const rawList = Array.isArray(entryOrList) ? entryOrList : [entryOrList];
     const targets = rawList.filter((entry) => {
       if (side === "left" && entry.status === "right_only") return false;
@@ -981,6 +1040,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <button
             class={`bc-tool-btn ${!isRecursiveScan() ? "active" : ""}`}
             onClick={() => {
+              if (isScanning()) {
+                notify(t("folder_diff.busy_reject"));
+                return;
+              }
               setIsRecursiveScan(false);
               scanRealFolders(leftInput(), rightInput(), false);
             }}
@@ -991,6 +1054,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <button
             class={`bc-tool-btn ${isRecursiveScan() ? "active" : ""}`}
             onClick={() => {
+              if (isScanning()) {
+                notify(t("folder_diff.busy_reject"));
+                return;
+              }
               setIsRecursiveScan(true);
               scanRealFolders(leftInput(), rightInput(), true);
             }}
@@ -1008,6 +1075,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             class={`bc-tool-btn ${compareMode() === "hash" ? "active" : ""}`}
             title={(isSftpUri(leftInput()) || isSftpUri(rightInput())) && compareMode() === "hash" ? t("folder_diff.sftp_fast_hint") : undefined}
             onClick={() => {
+              if (isScanning()) {
+                notify(t("folder_diff.busy_reject"));
+                return;
+              }
               const next = compareMode() === "hash" ? "fast" : "hash";
               setCompareMode(next);
               callRustRpc("update_user_preferences", {
@@ -1486,6 +1557,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
             onSelect={(selectedDir) => {
               const isLeft = side() === "left";
               setBrowserSide(null);
+              if (isScanning()) {
+                notify(t("folder_diff.busy_reject"));
+                return;
+              }
               if (isLeft) {
                 setLeftInput(selectedDir);
                 if (rightInput().trim()) {

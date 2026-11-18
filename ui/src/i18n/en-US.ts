@@ -292,6 +292,7 @@ export const enUS: I18nSchema = {
     truncated_hint: "(truncated at 30,000 items)",
     scanning_progress: "Scanning · {items} items / {dirs} dirs",
     cancel_scan: "Cancel",
+    busy_reject: "A scan operation is already in progress. Please cancel it first.",
   },
   file_browser: {
     up: "⬆ Up",
