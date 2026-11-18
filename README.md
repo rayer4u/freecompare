@@ -1,6 +1,6 @@
 # FreeCompare
 
-[![Version](https://img.shields.io/badge/version-v0.11.0-blue.svg)](https://github.com/rayer4u/freecompare/releases)
+[![Version](https://img.shields.io/badge/version-v0.12.0-blue.svg)](https://github.com/rayer4u/freecompare/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [Beyond Compare](https://www.scootersoftware.com/)的一种开源免费替代，基于Rust+Tauri技术构建的开源跨平台，面向程序员，选取核心功能，用于文本(代码)、目录比较生产力工具。小巧快速，稳定可靠。
