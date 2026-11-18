@@ -1,5 +1,8 @@
 # FreeCompare
 
+[![Version](https://img.shields.io/badge/version-v0.11.0-blue.svg)](https://github.com/rayer4u/freecompare/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 [Beyond Compare](https://www.scootersoftware.com/)的一种开源免费替代，基于Rust+Tauri技术构建的开源跨平台，面向程序员，选取核心功能，用于文本(代码)、目录比较生产力工具。小巧快速，稳定可靠。
 
 受[OpenCompare](https://github.com/chaxiu/OpenCompare)启发，作为一个老程序员，beyondcompare的资深付费用户，AI变革的参与者，为解决bcompare的能力逐渐落后开发需求问题，探索和AI合作开发能力边界，测试验证AI的快速迭代能力，新建此项目。此项目的AI编程工具是agy cli，模型是Gemini 4，本人仅作为产品经理和使用者。
@@ -149,3 +152,7 @@ FreeCompare 的所有视图与交互演进严格遵循以下设计准则（开�
 ## 工程与架构规范
 
 本项目遵循严格的跨平台与自包含规范，详见 [AGENTS.md](AGENTS.md)。
+
+## 许可证 (License)
+
+本项目基于 [MIT License](LICENSE) 开源。
