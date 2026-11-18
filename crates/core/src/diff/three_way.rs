@@ -89,6 +89,14 @@ impl ThreeWaySession {
         right_path: impl AsRef<Path>,
         output_path: Option<std::path::PathBuf>,
     ) -> Result<Self, BufferError> {
+        for p in [left_path.as_ref(), base_path.as_ref(), right_path.as_ref()] {
+            if crate::office::is_office_path(&p.to_string_lossy()) {
+                return Err(BufferError::Office(
+                    "暂不支持对 Excel / Word (.xlsx/.docx/.doc) 文档执行三向合并，请使用双向只读比对"
+                        .to_string(),
+                ));
+            }
+        }
         let mut session = Self {
             left: TextBuffer::from_file(left_path)?,
             base: TextBuffer::from_file(base_path)?,

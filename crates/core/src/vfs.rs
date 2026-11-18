@@ -101,6 +101,24 @@ pub fn read_bytes(path: &str) -> io::Result<Vec<u8>> {
     }
 }
 
+/// Reads up to `max_len` header bytes from a file (used for magic-byte sniffing).
+pub fn read_header_bytes(path: &str, max_len: usize) -> io::Result<Vec<u8>> {
+    if max_len == 0 {
+        return Ok(Vec::new());
+    }
+    if is_sftp_uri(path) {
+        let bytes = sftp_read_bytes(path)?;
+        Ok(bytes.into_iter().take(max_len).collect())
+    } else {
+        use std::io::Read;
+        let mut file = fs::File::open(expand_path(path))?;
+        let mut buf = vec![0u8; max_len];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+}
+
 pub fn write_bytes(path: &str, bytes: &[u8]) -> io::Result<()> {
     if is_sftp_uri(path) {
         sftp_write_bytes(path, bytes)

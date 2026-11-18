@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod cli_args;
 pub mod diff;
 pub mod folder;
+pub mod office;
 pub mod session;
 pub mod sftp;
 pub mod sftp_sites;

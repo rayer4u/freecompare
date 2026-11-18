@@ -1,4 +1,5 @@
-use crate::buffer::{BufferError, TextBuffer};
+use crate::buffer::{expand_path, BufferError, TextBuffer};
+use crate::office;
 use crate::syntax::{highlight_line, SyntaxToken};
 use imara_diff::{diff, intern::InternedInput, Algorithm, UnifiedDiffBuilder};
 use serde::{Deserialize, Serialize};
@@ -134,6 +135,10 @@ pub struct TwoWaySession {
     pub hunks: Vec<TwoWayHunk>,
     pub stats: DiffStats,
     pub syntax_ext: Option<String>,
+    pub left_readonly: bool,
+    pub right_readonly: bool,
+    pub left_doc_info: Option<String>,
+    pub right_doc_info: Option<String>,
 }
 
 impl TwoWaySession {
@@ -149,6 +154,10 @@ impl TwoWaySession {
             hunks: Vec::new(),
             stats: DiffStats::default(),
             syntax_ext: None,
+            left_readonly: false,
+            right_readonly: false,
+            left_doc_info: None,
+            right_doc_info: None,
         };
         session.recompute();
         session
@@ -165,8 +174,13 @@ impl TwoWaySession {
             .or_else(|| right_path.as_ref().extension())
             .and_then(|e| e.to_str())
             .map(|s| s.to_lowercase());
-        let left = TextBuffer::from_file(left_path)?;
-        let right = TextBuffer::from_file(right_path)?;
+        let (left, left_readonly, left_doc_info) = load_side_buffer(left_path.as_ref())?;
+        let (right, right_readonly, right_doc_info) = load_side_buffer(right_path.as_ref())?;
+        let syntax_ext = if left_readonly && right_readonly {
+            None
+        } else {
+            ext
+        };
         let mut session = Self {
             left,
             right,
@@ -175,7 +189,11 @@ impl TwoWaySession {
             visible_rows: Vec::new(),
             hunks: Vec::new(),
             stats: DiffStats::default(),
-            syntax_ext: ext,
+            syntax_ext,
+            left_readonly,
+            right_readonly,
+            left_doc_info,
+            right_doc_info,
         };
         session.recompute();
         Ok(session)
@@ -909,4 +927,19 @@ fn push_coalesced(segments: &mut Vec<InlineSegment>, tag: InlineTag, text: &str)
         text: text.to_string(),
         tag,
     });
+}
+
+fn load_side_buffer(path: &Path) -> Result<(TextBuffer, bool, Option<String>), BufferError> {
+    let expanded = expand_path(path);
+    let path_str = expanded.to_string_lossy();
+    if office::is_office_path(&path_str) {
+        let doc = office::load_office_document(&path_str)
+            .map_err(|e| BufferError::Office(e.to_string()))?;
+        let mut buf = TextBuffer::from_str_content(&doc.text);
+        buf.set_path(expanded);
+        Ok((buf, true, Some(doc.doc_info)))
+    } else {
+        let buf = TextBuffer::from_file(path)?;
+        Ok((buf, false, None))
+    }
 }

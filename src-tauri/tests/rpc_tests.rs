@@ -571,3 +571,143 @@ fn test_sftp_rpcs_ssh_config_and_validation() {
     );
     assert!(invalid_sftp.is_err());
 }
+
+fn make_test_docx_bytes(paragraph: &str) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        zip.write_all(xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+#[test]
+fn test_office_readonly_rpcs_and_write_protection() {
+    let dir = tempdir().unwrap();
+    let docx_left = dir.path().join("left.docx");
+    let docx_right = dir.path().join("right.docx");
+    let txt_right = dir.path().join("plain.txt");
+    let doc_legacy = dir.path().join("old.doc");
+    let disguised_zip = dir.path().join("binary_container.dat");
+    let disguised_ole = dir.path().join("ole_container.dat");
+
+    fs::write(&docx_left, make_test_docx_bytes("Alpha Docx Content")).unwrap();
+    fs::write(&docx_right, make_test_docx_bytes("Beta Docx Content")).unwrap();
+    fs::write(&txt_right, "Plain text content\n").unwrap();
+    fs::write(&doc_legacy, freecompare_core::office::OLE2_MAGIC).unwrap();
+    fs::write(&disguised_zip, freecompare_core::office::ZIP_MAGIC).unwrap();
+    fs::write(&disguised_ole, freecompare_core::office::OLE2_MAGIC).unwrap();
+
+    let backend = AppBackend::new();
+
+    // 1. `read_text_file` returns readonly=true & doc_info for .docx, readonly=false & null for .txt
+    let read_docx = backend
+        .dispatch_rpc(
+            "read_text_file",
+            &json!({ "path": docx_left.to_string_lossy() }),
+        )
+        .unwrap();
+    assert_eq!(read_docx["readonly"], true);
+    assert_eq!(read_docx["doc_info"], "DOCX · 只读");
+    assert!(read_docx["content"]
+        .as_str()
+        .unwrap()
+        .contains("Alpha Docx Content"));
+
+    let read_txt = backend
+        .dispatch_rpc(
+            "read_text_file",
+            &json!({ "path": txt_right.to_string_lossy() }),
+        )
+        .unwrap();
+    assert_eq!(read_txt["readonly"], false);
+    assert!(read_txt["doc_info"].is_null());
+
+    // 2. `open_two_way_files` returns per-side readonly & doc_info (including mixed docx vs txt)
+    let open_mixed = backend
+        .dispatch_rpc(
+            "open_two_way_files",
+            &json!({
+                "left_path": docx_left.to_string_lossy(),
+                "right_path": txt_right.to_string_lossy(),
+                "options": {
+                    "ignore_whitespace": false,
+                    "ignore_case": false,
+                    "show_only_diffs": false,
+                    "context_lines": 3
+                },
+                "initial_row_count": 50
+            }),
+        )
+        .unwrap();
+    assert_eq!(open_mixed["left_readonly"], true);
+    assert_eq!(open_mixed["right_readonly"], false);
+    assert_eq!(open_mixed["left_doc_info"], "DOCX · 只读");
+    assert!(open_mixed["right_doc_info"].is_null());
+
+    let mixed_sid = open_mixed["session_id"].as_str().unwrap();
+    // `save_two_way_side` rejects saving the readonly left side
+    let save_ro = backend.dispatch_rpc(
+        "save_two_way_side",
+        &json!({ "session_id": mixed_sid, "is_left": true }),
+    );
+    assert!(save_ro.is_err());
+
+    // 3. Hard write-protection gate in `write_text_file_with_options` (extension + magic bytes)
+    for target in [&docx_left, &doc_legacy, &disguised_zip, &disguised_ole] {
+        let err = backend
+            .write_text_file_with_options(target.to_str().unwrap(), "corrupted", None, None)
+            .unwrap_err();
+        assert!(
+            err.contains("禁止"),
+            "expected write protection error for {}, got: {err}",
+            target.display()
+        );
+    }
+    // Verify original bytes on disk were NOT overwritten
+    assert_eq!(
+        fs::read(&disguised_zip).unwrap(),
+        freecompare_core::office::ZIP_MAGIC
+    );
+
+    // 4. `open_three_way_files` explicitly rejects Office files
+    let err_3w = backend.open_three_way_files(
+        docx_left.to_str().unwrap(),
+        docx_right.to_str().unwrap(),
+        txt_right.to_str().unwrap(),
+        None,
+        50,
+    );
+    assert!(err_3w.is_err());
+    assert!(err_3w.unwrap_err().contains("三向合并"));
+
+    // 5. `-qc` quick compare works on .docx files
+    let inv_same = freecompare_core::CliInvocation::parse([
+        "-qc",
+        docx_left.to_str().unwrap(),
+        docx_left.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        backend.execute_quick_compare(&inv_same),
+        freecompare_core::exit_codes::BINARY_SAME
+    );
+
+    let inv_diff = freecompare_core::CliInvocation::parse([
+        "-qc",
+        docx_left.to_str().unwrap(),
+        docx_right.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        backend.execute_quick_compare(&inv_diff),
+        freecompare_core::exit_codes::IMPORTANT_DIFF
+    );
+}

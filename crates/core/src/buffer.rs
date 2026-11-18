@@ -10,6 +10,8 @@ pub enum BufferError {
     Io(#[from] std::io::Error),
     #[error("Line index {0} out of bounds (total lines: {1})")]
     LineOutOfBounds(usize, usize),
+    #[error("{0}")]
+    Office(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

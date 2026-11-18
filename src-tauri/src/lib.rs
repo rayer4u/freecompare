@@ -15,7 +15,7 @@ use freecompare_core::{
         apply_folder_item_operation, compare_folders, FolderCompareOptions,
         FolderDiffResult, FolderSyncActionKind,
     },
-    is_sftp_uri, list_ssh_config_hosts,
+    is_sftp_uri, list_ssh_config_hosts, office,
     sftp::{prime_location_credentials, prime_location_credentials_with_opts, sftp_list_dir, SftpLocation},
     test_sftp_connection, vfs, EncodingKind, LineEnding, SaveSftpSiteInput, SessionKind,
     SessionManager, SessionRecord, SftpConnectOptions, SftpConnectionTestResult, SftpSitePublic,
@@ -33,6 +33,8 @@ pub struct ReadTextFileResponse {
     pub line_count: usize,
     pub encoding: String,
     pub line_ending: String,
+    pub readonly: bool,
+    pub doc_info: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,10 @@ pub struct OpenTwoWayResponse {
     pub right_path: String,
     pub summary: TwoWayDiffResult,
     pub initial_slice: ViewportSliceDto,
+    pub left_readonly: bool,
+    pub right_readonly: bool,
+    pub left_doc_info: Option<String>,
+    pub right_doc_info: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,15 +583,31 @@ impl AppBackend {
         self.prime_saved_sftp_credentials(path);
         let expanded = expand_path(path);
         let raw_str = expanded.to_string_lossy().to_string();
+        let display_path = canonical_or_display(&expanded);
+        if office::is_office_path(&raw_str) {
+            let doc = office::load_office_document(&raw_str)
+                .map_err(|e| format!("无法读取 Office 文件 ({raw_str}): {e}"))?;
+            let buffer = TextBuffer::from_str_content(&doc.text);
+            return Ok(ReadTextFileResponse {
+                content: buffer.full_text(),
+                path: display_path,
+                line_count: buffer.line_count(),
+                encoding: "UTF-8".to_string(),
+                line_ending: "LF (Unix/macOS)".to_string(),
+                readonly: true,
+                doc_info: Some(doc.doc_info),
+            });
+        }
         let buffer = TextBuffer::from_file(&expanded)
             .map_err(|e| format!("无法读取文件 ({raw_str}): {e}"))?;
-        let display_path = canonical_or_display(&expanded);
         Ok(ReadTextFileResponse {
             content: buffer.full_text(),
             path: display_path,
             line_count: buffer.line_count(),
             encoding: buffer.encoding().label().to_string(),
             line_ending: buffer.line_ending().label().to_string(),
+            readonly: false,
+            doc_info: None,
         })
     }
 
@@ -606,6 +628,7 @@ impl AppBackend {
         if let Ok(loc) = SftpLocation::parse(&path_str) {
             prime_location_credentials(&loc);
         }
+        office::ensure_writable_text_target(&path_str)?;
 
         let explicit_encoding = encoding.and_then(EncodingKind::from_label_or_name);
         let explicit_line_ending = line_ending.and_then(LineEnding::from_label_or_name);
@@ -677,6 +700,10 @@ impl AppBackend {
             .map_err(|e| format!("无法读取文件 ({left_str} vs {right_str}): {e}"))?;
         let summary = session.summary();
         let initial_slice = session.get_viewport_slice(0, initial_row_count);
+        let left_readonly = session.left_readonly;
+        let right_readonly = session.right_readonly;
+        let left_doc_info = session.left_doc_info.clone();
+        let right_doc_info = session.right_doc_info.clone();
         let session_id = self.manager.allocate_id("text");
         self.manager
             .two_way_sessions
@@ -703,6 +730,10 @@ impl AppBackend {
             right_path: right_str,
             summary,
             initial_slice,
+            left_readonly,
+            right_readonly,
+            left_doc_info,
+            right_doc_info,
         })
     }
 
@@ -728,6 +759,10 @@ impl AppBackend {
             right_path: "crates/core/src/diff/engine.rs (Right)".to_string(),
             summary,
             initial_slice,
+            left_readonly: false,
+            right_readonly: false,
+            left_doc_info: None,
+            right_doc_info: None,
         }
     }
 
@@ -827,6 +862,11 @@ impl AppBackend {
         let session = guard
             .get_mut(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        if let Some(target) = target_path {
+            office::ensure_writable_text_target(target)?;
+        } else if (is_left && session.left_readonly) || (!is_left && session.right_readonly) {
+            return Err("Office 文档处于只读比对模式，禁止保存".to_string());
+        }
         let path_ref = target_path.map(Path::new);
         if is_left {
             session.left.save(path_ref).map_err(|e| e.to_string())?;
