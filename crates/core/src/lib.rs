@@ -36,7 +36,8 @@ pub use diff::{
     },
 };
 pub use folder::{
-    compare_folders, compare_subfolder, FolderCompareMode, FolderCompareOptions, FolderDiffResult,
+    compare_folders, compare_folders_with_control, compare_subfolder,
+    compare_subfolder_with_control, FolderCompareMode, FolderCompareOptions, FolderDiffResult,
     FolderEntryDto, FolderItemStatus, FolderSubtreeResult, FolderSyncAction, FolderSyncActionKind,
     FolderSyncPlan,
 };

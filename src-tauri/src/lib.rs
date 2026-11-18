@@ -1010,6 +1010,47 @@ impl AppBackend {
             .save_merged(target_path.map(Path::new))
             .map_err(|e| e.to_string())
     }
+}
+
+struct ActiveScanGuard<'a> {
+    backend: &'a AppBackend,
+    scan_key: String,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl Drop for ActiveScanGuard<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.backend.active_scans.lock();
+        if guard
+            .get(&self.scan_key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &self.cancel_flag))
+        {
+            guard.remove(&self.scan_key);
+        }
+    }
+}
+
+impl AppBackend {
+    fn register_active_scan(
+        &self,
+        scan_id: Option<&str>,
+    ) -> (String, Arc<AtomicBool>, ActiveScanGuard<'_>) {
+        let scan_key = scan_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("scan-{}", self.scan_seq.fetch_add(1, Ordering::Relaxed)));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.active_scans
+            .lock()
+            .insert(scan_key.clone(), Arc::clone(&cancel_flag));
+        let guard = ActiveScanGuard {
+            backend: self,
+            scan_key: scan_key.clone(),
+            cancel_flag: Arc::clone(&cancel_flag),
+        };
+        (scan_key, cancel_flag, guard)
+    }
 
     pub fn scan_folder_diff(
         &self,
@@ -1034,37 +1075,7 @@ impl AppBackend {
         let left_display = canonical_or_display(&left_expanded);
         let right_display = canonical_or_display(&right_expanded);
 
-        let scan_key = scan_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("scan-{}", self.scan_seq.fetch_add(1, Ordering::Relaxed)));
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        self.active_scans
-            .lock()
-            .insert(scan_key.clone(), Arc::clone(&cancel_flag));
-
-        struct ActiveScanGuard<'a> {
-            backend: &'a AppBackend,
-            scan_key: String,
-            cancel_flag: Arc<AtomicBool>,
-        }
-        impl Drop for ActiveScanGuard<'_> {
-            fn drop(&mut self) {
-                let mut guard = self.backend.active_scans.lock();
-                if guard
-                    .get(&self.scan_key)
-                    .is_some_and(|existing| Arc::ptr_eq(existing, &self.cancel_flag))
-                {
-                    guard.remove(&self.scan_key);
-                }
-            }
-        }
-        let _active_guard = ActiveScanGuard {
-            backend: self,
-            scan_key: scan_key.clone(),
-            cancel_flag: Arc::clone(&cancel_flag),
-        };
+        let (scan_key, cancel_flag, _active_guard) = self.register_active_scan(scan_id);
 
         let progress_cb = |dirs_scanned: usize, items_found: usize| {
             self.emit_scan_progress(FolderScanProgressEvent {
@@ -1110,12 +1121,47 @@ impl AppBackend {
         sub_rel: &str,
         options: FolderCompareOptions,
     ) -> Result<freecompare_core::folder::FolderSubtreeResult, String> {
+        self.compare_subfolder_with_id(left_dir, right_dir, sub_rel, options, None)
+    }
+
+    pub fn compare_subfolder_with_id(
+        &self,
+        left_dir: &str,
+        right_dir: &str,
+        sub_rel: &str,
+        options: FolderCompareOptions,
+        scan_id: Option<&str>,
+    ) -> Result<freecompare_core::folder::FolderSubtreeResult, String> {
         self.prime_saved_sftp_credentials(left_dir);
         self.prime_saved_sftp_credentials(right_dir);
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
-        freecompare_core::folder::compare_subfolder(&left_expanded, &right_expanded, sub_rel, &options)
-            .map_err(|e| format!("无法嵌套比较子目录 ({sub_rel}): {e}"))
+
+        let (scan_key, cancel_flag, _active_guard) = self.register_active_scan(scan_id);
+
+        let progress_cb = |dirs_scanned: usize, items_found: usize| {
+            self.emit_scan_progress(FolderScanProgressEvent {
+                scan_id: scan_key.clone(),
+                dirs_scanned,
+                items_found,
+            });
+        };
+
+        freecompare_core::folder::compare_subfolder_with_control(
+            &left_expanded,
+            &right_expanded,
+            sub_rel,
+            &options,
+            Some(&cancel_flag),
+            Some(&progress_cb),
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted && e.to_string() == "SCAN_CANCELLED" {
+                "SCAN_CANCELLED".to_string()
+            } else {
+                format!("无法嵌套比较子目录 ({sub_rel}): {e}")
+            }
+        })
     }
 
     pub fn sync_folder_item(
@@ -1445,7 +1491,12 @@ impl AppBackend {
                 let sub_rel = args["sub_rel"].as_str().unwrap_or("");
                 let options: FolderCompareOptions =
                     serde_json::from_value(args["options"].clone()).unwrap_or_default();
-                let res = self.compare_subfolder(left_dir, right_dir, sub_rel, options)?;
+                let scan_id = args["scan_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let res =
+                    self.compare_subfolder_with_id(left_dir, right_dir, sub_rel, options, scan_id)?;
                 Ok(json!(res))
             }
             "sync_folder_item" => {

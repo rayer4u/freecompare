@@ -216,6 +216,20 @@ pub fn compare_subfolder(
     sub_rel: &str,
     options: &FolderCompareOptions,
 ) -> std::io::Result<FolderSubtreeResult> {
+    compare_subfolder_with_control(left_root, right_root, sub_rel, options, None, None)
+}
+
+pub fn compare_subfolder_with_control(
+    left_root: impl AsRef<Path>,
+    right_root: impl AsRef<Path>,
+    sub_rel: &str,
+    options: &FolderCompareOptions,
+    cancel: Option<&AtomicBool>,
+    on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+) -> std::io::Result<FolderSubtreeResult> {
+    if is_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     let left_vfs = VfsPath::parse(&left_root.as_ref().to_string_lossy())?;
     let right_vfs = VfsPath::parse(&right_root.as_ref().to_string_lossy())?;
     let glob_set = build_exclude_globset(&options.exclude_globs);
@@ -226,7 +240,7 @@ pub fn compare_subfolder(
     let mut entries = Vec::new();
     let mut stats = FolderDiffStats::default();
     let mut truncated = false;
-    let mut tracker = ScanProgressTracker::new(None);
+    let mut tracker = ScanProgressTracker::new(on_progress);
 
     let mut sub_opts = options.clone();
     if !options.recursive {
@@ -244,9 +258,13 @@ pub fn compare_subfolder(
         &mut entries,
         &mut stats,
         &mut truncated,
-        None,
+        cancel,
         &mut tracker,
     )?;
+
+    if is_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
 
     let has_diff = entries
         .iter()

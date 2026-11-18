@@ -649,3 +649,77 @@ fn test_compare_subfolder_ignores_unknown_child_dirs() {
     assert_eq!(nested_entry.status, FolderItemStatus::Unknown);
     assert_eq!(sub.status, FolderItemStatus::Equal);
 }
+
+#[test]
+fn test_compare_subfolder_cancel_and_progress() {
+    use freecompare_core::folder::compare_subfolder_with_control;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+    fs::create_dir_all(left_dir.path().join("parent/child")).unwrap();
+    fs::create_dir_all(right_dir.path().join("parent/child")).unwrap();
+    fs::write(left_dir.path().join("parent/child/a.txt"), "hello").unwrap();
+    fs::write(right_dir.path().join("parent/child/a.txt"), "hello").unwrap();
+
+    let opts = FolderCompareOptions {
+        mode: FolderCompareMode::FastMetadata,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: true,
+        max_depth: None,
+    };
+
+    // 1. Pre-set cancel flag immediately aborts with SCAN_CANCELLED
+    let cancel_true = AtomicBool::new(true);
+    let err = compare_subfolder_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        "parent",
+        &opts,
+        Some(&cancel_true),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert_eq!(err.to_string(), "SCAN_CANCELLED");
+
+    // 2. Progress callback is invoked and returns expected subtree entries
+    let cancel_false = AtomicBool::new(false);
+    let progress_events: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+    let cb = |dirs: usize, items: usize| {
+        progress_events.lock().unwrap().push((dirs, items));
+    };
+    let res = compare_subfolder_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        "parent",
+        &opts,
+        Some(&cancel_false),
+        Some(&cb),
+    )
+    .unwrap();
+    assert_eq!(res.relative_path, "parent");
+    assert!(!res.entries.is_empty());
+    assert!(!progress_events.lock().unwrap().is_empty());
+
+    // 3. Cancel mid-scan via progress callback
+    let cancel_mid = AtomicBool::new(false);
+    let cb_cancel = |_dirs: usize, _items: usize| {
+        cancel_mid.store(true, Ordering::Relaxed);
+    };
+    let mid_err = compare_subfolder_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        "parent",
+        &opts,
+        Some(&cancel_mid),
+        Some(&cb_cancel),
+    )
+    .unwrap_err();
+    assert_eq!(mid_err.kind(), std::io::ErrorKind::Interrupted);
+    assert_eq!(mid_err.to_string(), "SCAN_CANCELLED");
+}

@@ -751,3 +751,98 @@ fn test_folder_scan_progress_and_cancel_rpc() {
         .unwrap();
     assert_eq!(cancel_idle["cancelled"], false);
 }
+
+#[test]
+fn test_compare_subfolder_progress_and_cancel_rpc() {
+    let left = tempdir().unwrap();
+    let right = tempdir().unwrap();
+    fs::create_dir_all(left.path().join("parent/sub")).unwrap();
+    fs::create_dir_all(right.path().join("parent/sub")).unwrap();
+    fs::write(left.path().join("parent/sub/a.txt"), "alpha").unwrap();
+    fs::write(right.path().join("parent/sub/a.txt"), "alpha").unwrap();
+
+    let backend = std::sync::Arc::new(AppBackend::new());
+    let rx = backend.subscribe_scan_progress();
+
+    let res = backend
+        .dispatch_rpc(
+            "compare_subfolder",
+            &json!({
+                "left_dir": left.path().to_string_lossy(),
+                "right_dir": right.path().to_string_lossy(),
+                "sub_rel": "parent",
+                "scan_id": "sub-scan-test-1",
+                "options": {
+                    "mode": "fast_metadata",
+                    "ignore_case_names": false,
+                    "exclude_globs": [],
+                    "recursive": true
+                }
+            }),
+        )
+        .unwrap();
+    assert_eq!(res["relative_path"], "parent");
+
+    let ev = rx.try_recv().expect("expected folder_scan_progress event");
+    assert_eq!(ev.scan_id, "sub-scan-test-1");
+    assert!(ev.dirs_scanned >= 1);
+
+    let cancel_idle = backend
+        .dispatch_rpc("cancel_folder_scan", &json!({ "scan_id": "sub-scan-test-1" }))
+        .unwrap();
+    assert_eq!(cancel_idle["cancelled"], false);
+
+    // Test active cancellation via cancel_folder_scan while compare_subfolder is running
+    for i in 0..400 {
+        let dir_name = format!("parent/d_{i:03}");
+        fs::create_dir_all(left.path().join(&dir_name)).unwrap();
+        fs::create_dir_all(right.path().join(&dir_name)).unwrap();
+        fs::write(left.path().join(&dir_name).join("f.txt"), "payload").unwrap();
+        fs::write(right.path().join(&dir_name).join("f.txt"), "payload").unwrap();
+    }
+
+    let backend_bg = std::sync::Arc::clone(&backend);
+    let left_str = left.path().to_string_lossy().to_string();
+    let right_str = right.path().to_string_lossy().to_string();
+    let handle = std::thread::spawn(move || {
+        backend_bg.dispatch_rpc(
+            "compare_subfolder",
+            &json!({
+                "left_dir": left_str,
+                "right_dir": right_str,
+                "sub_rel": "parent",
+                "scan_id": "sub-scan-cancel-1",
+                "options": {
+                    "mode": "content_hash",
+                    "ignore_case_names": false,
+                    "exclude_globs": [],
+                    "recursive": true
+                }
+            }),
+        )
+    });
+
+    let ev_cancel = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("expected initial progress event before cancel");
+    assert_eq!(ev_cancel.scan_id, "sub-scan-cancel-1");
+
+    let cancel_active = backend
+        .dispatch_rpc(
+            "cancel_folder_scan",
+            &json!({ "scan_id": "sub-scan-cancel-1" }),
+        )
+        .unwrap();
+    assert_eq!(cancel_active["cancelled"], true);
+
+    let err = handle.join().unwrap().unwrap_err();
+    assert_eq!(err, "SCAN_CANCELLED");
+
+    let cancel_after = backend
+        .dispatch_rpc(
+            "cancel_folder_scan",
+            &json!({ "scan_id": "sub-scan-cancel-1" }),
+        )
+        .unwrap();
+    assert_eq!(cancel_after["cancelled"], false);
+}
