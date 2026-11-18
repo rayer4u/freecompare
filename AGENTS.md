@@ -83,6 +83,7 @@ cargo install --path crates/cli --force
    git commit --author="Antigravity <antigravity@ai.invalid>" -m "<type>: <中文描述>"
    ```
 2. **语言与风格**：`<type>` 保留英文（`feat` / `fix` / `docs` / `chore`），正文与描述**必须使用中文**、简洁纯文本；除非用户要求，提交信息中不带版本号。
+3. **线性历史（禁 Merge）**：合入工作分支或并行 Swarm 分支时，统一使用 `git rebase`、`git cherry-pick` 或 `--ff-only` 保持线性提交历史，严禁产生 `Merge branch ...` 提交。
 
 ---
 
