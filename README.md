@@ -162,6 +162,15 @@ FreeCompare 的所有视图与交互演进严格遵循以下设计准则（开�
 
 本项目遵循严格的跨平台与自包含规范，详见 [AGENTS.md](AGENTS.md)。
 
+## 发版与自动化发布
+
+仓库通过两个独立的 GitHub Actions 工作流完成持续集成与发版：
+
+- **日常 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）**：监听 `main` 分支推送与 Pull Request，在 Linux / Windows / macOS 三端执行前端测试、前端构建与 `cargo test --workspace`。
+- **自动发版（[`.github/workflows/release.yml`](.github/workflows/release.yml)）**：仅在推送 `v*` 版本 Tag（或手动 `workflow_dispatch`）时触发，避免分支推送与 Tag 推送同时触发两次发布；测试通过后自动交叉编译全平台产物并创建 GitHub Release。
+
+标准发版流程详见 [AGENTS.md](AGENTS.md) 第 7 节（同步版本号 → 全量测试与本地安装 → 线性提交 → 创建附注 Tag `vX.Y.Z` → 推送 `git push && git push origin vX.Y.Z`）。
+
 ## 许可证 (License)
 
 本项目基于 [MIT License](LICENSE) 开源。
