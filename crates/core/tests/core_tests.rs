@@ -537,3 +537,115 @@ fn test_folder_compare_streaming_blake3_and_parallel_hashing() {
     sorted.sort();
     assert_eq!(names, sorted);
 }
+
+#[test]
+fn test_folder_compare_cancel_progress_and_truncated() {
+    use freecompare_core::folder::compare_folders_with_control;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+    fs::create_dir_all(left_dir.path().join("sub")).unwrap();
+    fs::create_dir_all(right_dir.path().join("sub")).unwrap();
+    fs::write(left_dir.path().join("sub/a.txt"), "hello").unwrap();
+    fs::write(right_dir.path().join("sub/a.txt"), "hello").unwrap();
+
+    let opts = FolderCompareOptions {
+        mode: FolderCompareMode::FastMetadata,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: true,
+        max_depth: None,
+    };
+
+    // 1. Pre-set cancel flag immediately aborts with SCAN_CANCELLED
+    let cancel_true = AtomicBool::new(true);
+    let err = compare_folders_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        &opts,
+        Some(&cancel_true),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert_eq!(err.to_string(), "SCAN_CANCELLED");
+
+    // 2. Progress callback is invoked and truncated is false for small dirs
+    let cancel_false = AtomicBool::new(false);
+    let progress_events: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+    let cb = |dirs: usize, items: usize| {
+        progress_events.lock().unwrap().push((dirs, items));
+    };
+    let res = compare_folders_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        &opts,
+        Some(&cancel_false),
+        Some(&cb),
+    )
+    .unwrap();
+    assert!(!res.truncated);
+    assert!(!progress_events.lock().unwrap().is_empty());
+
+    // 3. Cancel mid-scan via progress callback
+    let cancel_mid = AtomicBool::new(false);
+    let cb_cancel = |_dirs: usize, _items: usize| {
+        cancel_mid.store(true, Ordering::Relaxed);
+    };
+    let mid_err = compare_folders_with_control(
+        left_dir.path(),
+        right_dir.path(),
+        &opts,
+        Some(&cancel_mid),
+        Some(&cb_cancel),
+    )
+    .unwrap_err();
+    assert_eq!(mid_err.to_string(), "SCAN_CANCELLED");
+
+    // 4. Truncated flag becomes true when exceeding 30,000 entries
+    let big_left = tempdir().unwrap();
+    let big_right = tempdir().unwrap();
+    for i in 0..30005 {
+        let name = format!("f_{i:05}");
+        fs::write(big_left.path().join(&name), b"").unwrap();
+    }
+    let big_res = compare_folders(big_left.path(), big_right.path(), &opts).unwrap();
+    assert_eq!(big_res.entries.len(), 30000);
+    assert!(big_res.truncated);
+}
+
+#[test]
+fn test_compare_subfolder_ignores_unknown_child_dirs() {
+    let left_dir = tempdir().unwrap();
+    let right_dir = tempdir().unwrap();
+
+    fs::create_dir_all(left_dir.path().join("parent/nested")).unwrap();
+    fs::create_dir_all(right_dir.path().join("parent/nested")).unwrap();
+    fs::write(left_dir.path().join("parent/same.txt"), "ok").unwrap();
+    fs::write(right_dir.path().join("parent/same.txt"), "ok").unwrap();
+    fs::write(left_dir.path().join("parent/nested/inner.txt"), "inner").unwrap();
+    fs::write(right_dir.path().join("parent/nested/inner.txt"), "inner").unwrap();
+
+    let opts = FolderCompareOptions {
+        mode: FolderCompareMode::ContentHash,
+        ignore_case_names: false,
+        exclude_globs: vec![],
+        recursive: false,
+        max_depth: None,
+    };
+
+    let sub = freecompare_core::folder::compare_subfolder(
+        left_dir.path(),
+        right_dir.path(),
+        "parent",
+        &opts,
+    )
+    .unwrap();
+    let nested_entry = sub.entries.iter().find(|e| e.name == "nested").unwrap();
+    assert_eq!(nested_entry.status, FolderItemStatus::Unknown);
+    assert_eq!(sub.status, FolderItemStatus::Equal);
+}

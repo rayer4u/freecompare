@@ -12,8 +12,8 @@ use freecompare_core::{
     },
     encode_string, expand_path,
     folder::{
-        apply_folder_item_operation, compare_folders, FolderCompareOptions,
-        FolderDiffResult, FolderSyncActionKind,
+        apply_folder_item_operation, compare_folders, compare_folders_with_control,
+        FolderCompareOptions, FolderDiffResult, FolderSyncActionKind,
     },
     is_sftp_uri, list_ssh_config_hosts, office,
     sftp::{prime_location_credentials, prime_location_credentials_with_opts, sftp_list_dir, SftpLocation},
@@ -21,10 +21,13 @@ use freecompare_core::{
     SessionManager, SessionRecord, SftpConnectOptions, SftpConnectionTestResult, SftpSitePublic,
     SftpSiteStore, SshHostEntry, StartupLaunchSession, TextBuffer, UserPreferences,
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadTextFileResponse {
@@ -104,10 +107,20 @@ pub fn get_app_info() -> AppInfoDto {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderScanProgressEvent {
+    pub scan_id: String,
+    pub dirs_scanned: usize,
+    pub items_found: usize,
+}
+
 pub struct AppBackend {
     pub manager: SessionManager,
     pub sftp_sites: SftpSiteStore,
     pub exit_code: AtomicI32,
+    active_scans: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    progress_subscribers: Mutex<Vec<mpsc::Sender<FolderScanProgressEvent>>>,
+    scan_seq: AtomicU64,
 }
 
 impl Default for AppBackend {
@@ -122,7 +135,39 @@ impl AppBackend {
             manager: SessionManager::new(),
             sftp_sites: SftpSiteStore::new_default(),
             exit_code: AtomicI32::new(0),
+            active_scans: Mutex::new(HashMap::new()),
+            progress_subscribers: Mutex::new(Vec::new()),
+            scan_seq: AtomicU64::new(1),
         }
+    }
+
+    pub fn subscribe_scan_progress(&self) -> mpsc::Receiver<FolderScanProgressEvent> {
+        let (tx, rx) = mpsc::channel();
+        self.progress_subscribers.lock().push(tx);
+        rx
+    }
+
+    fn emit_scan_progress(&self, ev: FolderScanProgressEvent) {
+        let mut subs = self.progress_subscribers.lock();
+        subs.retain(|tx| tx.send(ev.clone()).is_ok());
+    }
+
+    pub fn cancel_folder_scan(&self, scan_id: Option<&str>) -> bool {
+        let guard = self.active_scans.lock();
+        if let Some(id) = scan_id {
+            if let Some(flag) = guard.get(id) {
+                flag.store(true, Ordering::SeqCst);
+                return true;
+            }
+            return false;
+        }
+        if guard.is_empty() {
+            return false;
+        }
+        for flag in guard.values() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        true
     }
 
     pub fn prime_saved_sftp_credentials(&self, raw: &str) {
@@ -972,14 +1017,77 @@ impl AppBackend {
         right_dir: &str,
         options: FolderCompareOptions,
     ) -> Result<FolderDiffResult, String> {
+        self.scan_folder_diff_with_id(left_dir, right_dir, options, None)
+    }
+
+    pub fn scan_folder_diff_with_id(
+        &self,
+        left_dir: &str,
+        right_dir: &str,
+        options: FolderCompareOptions,
+        scan_id: Option<&str>,
+    ) -> Result<FolderDiffResult, String> {
         self.prime_saved_sftp_credentials(left_dir);
         self.prime_saved_sftp_credentials(right_dir);
         let left_expanded = expand_path(left_dir);
         let right_expanded = expand_path(right_dir);
         let left_display = canonical_or_display(&left_expanded);
         let right_display = canonical_or_display(&right_expanded);
-        let res = compare_folders(&left_expanded, &right_expanded, &options)
-            .map_err(|e| format!("无法扫描目录 ({left_display} vs {right_display}): {e}"))?;
+
+        let scan_key = scan_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("scan-{}", self.scan_seq.fetch_add(1, Ordering::Relaxed)));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.active_scans
+            .lock()
+            .insert(scan_key.clone(), Arc::clone(&cancel_flag));
+
+        struct ActiveScanGuard<'a> {
+            backend: &'a AppBackend,
+            scan_key: String,
+            cancel_flag: Arc<AtomicBool>,
+        }
+        impl Drop for ActiveScanGuard<'_> {
+            fn drop(&mut self) {
+                let mut guard = self.backend.active_scans.lock();
+                if guard
+                    .get(&self.scan_key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &self.cancel_flag))
+                {
+                    guard.remove(&self.scan_key);
+                }
+            }
+        }
+        let _active_guard = ActiveScanGuard {
+            backend: self,
+            scan_key: scan_key.clone(),
+            cancel_flag: Arc::clone(&cancel_flag),
+        };
+
+        let progress_cb = |dirs_scanned: usize, items_found: usize| {
+            self.emit_scan_progress(FolderScanProgressEvent {
+                scan_id: scan_key.clone(),
+                dirs_scanned,
+                items_found,
+            });
+        };
+
+        let res = compare_folders_with_control(
+            &left_expanded,
+            &right_expanded,
+            &options,
+            Some(&cancel_flag),
+            Some(&progress_cb),
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted && e.to_string() == "SCAN_CANCELLED" {
+                "SCAN_CANCELLED".to_string()
+            } else {
+                format!("无法扫描目录 ({left_display} vs {right_display}): {e}")
+            }
+        })?;
         self.manager.record_recent(
             format!(
                 "{} ↔ {}",
@@ -1316,8 +1424,20 @@ impl AppBackend {
                 let right_dir = args["right_dir"].as_str().unwrap_or("");
                 let options: FolderCompareOptions =
                     serde_json::from_value(args["options"].clone()).unwrap_or_default();
-                let res = self.scan_folder_diff(left_dir, right_dir, options)?;
+                let scan_id = args["scan_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let res = self.scan_folder_diff_with_id(left_dir, right_dir, options, scan_id)?;
                 Ok(json!(res))
+            }
+            "cancel_folder_scan" => {
+                let scan_id = args["scan_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let cancelled = self.cancel_folder_scan(scan_id);
+                Ok(json!({ "cancelled": cancelled }))
             }
             "compare_subfolder" => {
                 let left_dir = args["left_dir"].as_str().unwrap_or("");

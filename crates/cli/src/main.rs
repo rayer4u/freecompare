@@ -716,6 +716,29 @@ fn handle_http_connection(
         tracker.active_connections.fetch_add(1, Ordering::SeqCst);
         tracker.touch();
 
+        let rx = backend.subscribe_scan_progress();
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_writer = Arc::clone(&closed);
+        if let Ok(mut write_stream) = stream.try_clone() {
+            std::thread::spawn(move || {
+                while !closed_writer.load(Ordering::SeqCst) {
+                    match rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(ev) => {
+                            let data = serde_json::to_string(&ev).unwrap_or_default();
+                            let msg = format!("event: folder_scan_progress\ndata: {data}\n\n");
+                            if write_stream.write_all(msg.as_bytes()).is_err()
+                                || write_stream.flush().is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+        }
+
         // Hold connection until client disconnects (OS will send FIN/RST on window close)
         let mut buf = [0u8; 128];
         loop {
@@ -724,6 +747,7 @@ fn handle_http_connection(
                 Ok(_) => {}
             }
         }
+        closed.store(true, Ordering::SeqCst);
 
         tracker.active_connections.fetch_sub(1, Ordering::SeqCst);
         tracker.last_heartbeat_ms.store(now_ms(), Ordering::SeqCst);

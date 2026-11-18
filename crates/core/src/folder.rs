@@ -4,6 +4,11 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const MAX_FOLDER_ENTRIES: usize = 30000;
+const PROGRESS_THROTTLE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +92,8 @@ pub struct FolderDiffResult {
     pub right_root: String,
     pub entries: Vec<FolderEntryDto>,
     pub stats: FolderDiffStats,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,10 +117,66 @@ pub struct FolderSyncPlan {
     pub actions: Vec<FolderSyncAction>,
 }
 
+struct ScanProgressTracker<'a> {
+    dirs_scanned: usize,
+    last_emit: Option<Instant>,
+    on_progress: Option<&'a (dyn Fn(usize, usize) + Send + Sync)>,
+}
+
+impl<'a> ScanProgressTracker<'a> {
+    fn new(on_progress: Option<&'a (dyn Fn(usize, usize) + Send + Sync)>) -> Self {
+        Self {
+            dirs_scanned: 0,
+            last_emit: None,
+            on_progress,
+        }
+    }
+
+    fn record_dir(&mut self, items_found: usize) {
+        self.dirs_scanned += 1;
+        self.maybe_emit(items_found);
+    }
+
+    fn maybe_emit(&mut self, items_found: usize) {
+        let Some(cb) = self.on_progress else {
+            return;
+        };
+        let now = Instant::now();
+        let should_emit = match self.last_emit {
+            None => true,
+            Some(prev) => now.duration_since(prev) >= PROGRESS_THROTTLE,
+        };
+        if should_emit {
+            self.last_emit = Some(now);
+            cb(self.dirs_scanned, items_found);
+        }
+    }
+}
+
+#[inline]
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+#[inline]
+fn cancelled_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "SCAN_CANCELLED")
+}
+
 pub fn compare_folders(
     left_root: impl AsRef<Path>,
     right_root: impl AsRef<Path>,
     options: &FolderCompareOptions,
+) -> std::io::Result<FolderDiffResult> {
+    compare_folders_with_control(left_root, right_root, options, None, None)
+}
+
+pub fn compare_folders_with_control(
+    left_root: impl AsRef<Path>,
+    right_root: impl AsRef<Path>,
+    options: &FolderCompareOptions,
+    cancel: Option<&AtomicBool>,
+    on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
 ) -> std::io::Result<FolderDiffResult> {
     let left_vfs = VfsPath::parse(&left_root.as_ref().to_string_lossy())?;
     let right_vfs = VfsPath::parse(&right_root.as_ref().to_string_lossy())?;
@@ -121,6 +184,8 @@ pub fn compare_folders(
 
     let mut entries = Vec::new();
     let mut stats = FolderDiffStats::default();
+    let mut truncated = false;
+    let mut tracker = ScanProgressTracker::new(on_progress);
 
     compare_dir_recursive(
         &left_vfs,
@@ -131,6 +196,9 @@ pub fn compare_folders(
         &glob_set,
         &mut entries,
         &mut stats,
+        &mut truncated,
+        cancel,
+        &mut tracker,
     )?;
 
     Ok(FolderDiffResult {
@@ -138,6 +206,7 @@ pub fn compare_folders(
         right_root: right_vfs.display_string(),
         entries,
         stats,
+        truncated,
     })
 }
 
@@ -156,6 +225,8 @@ pub fn compare_subfolder(
 
     let mut entries = Vec::new();
     let mut stats = FolderDiffStats::default();
+    let mut truncated = false;
+    let mut tracker = ScanProgressTracker::new(None);
 
     let mut sub_opts = options.clone();
     if !options.recursive {
@@ -172,9 +243,14 @@ pub fn compare_subfolder(
         &glob_set,
         &mut entries,
         &mut stats,
+        &mut truncated,
+        None,
+        &mut tracker,
     )?;
 
-    let has_diff = entries.iter().any(|e| e.status != FolderItemStatus::Equal);
+    let has_diff = entries
+        .iter()
+        .any(|e| e.status != FolderItemStatus::Equal && e.status != FolderItemStatus::Unknown);
     let l_exists = vfs::exists(&left_vfs.join_rel(&clean_rel).display_string());
     let r_exists = vfs::exists(&right_vfs.join_rel(&clean_rel).display_string());
 
@@ -217,10 +293,19 @@ fn compare_dir_recursive(
     glob_set: &GlobSet,
     out: &mut Vec<FolderEntryDto>,
     stats: &mut FolderDiffStats,
+    truncated: &mut bool,
+    cancel: Option<&AtomicBool>,
+    tracker: &mut ScanProgressTracker<'_>,
 ) -> std::io::Result<()> {
-    if out.len() >= 30000 {
+    if is_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+    if out.len() >= MAX_FOLDER_ENTRIES {
+        *truncated = true;
         return Ok(());
     }
+
+    tracker.record_dir(out.len());
 
     let left_dir = left_root.join_rel(rel_dir).display_string();
     let right_dir = right_root.join_rel(rel_dir).display_string();
@@ -276,6 +361,13 @@ fn compare_dir_recursive(
     }
 
     for key in dir_keys {
+        if is_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        if out.len() >= MAX_FOLDER_ENTRIES {
+            *truncated = true;
+            return Ok(());
+        }
         let l_meta = left_map.get(&key);
         let r_meta = right_map.get(&key);
 
@@ -330,13 +422,16 @@ fn compare_dir_recursive(
                 glob_set,
                 out,
                 stats,
+                truncated,
+                cancel,
+                tracker,
             )?;
 
             // Propagate child differences upward to parent directory status
             if initial_status == FolderItemStatus::Equal {
                 let has_diff_child = out[child_start..]
                     .iter()
-                    .any(|c| c.status != FolderItemStatus::Equal);
+                    .any(|c| c.status != FolderItemStatus::Equal && c.status != FolderItemStatus::Unknown);
                 if has_diff_child {
                     out[dir_idx].status = FolderItemStatus::Modified;
                 }
@@ -344,10 +439,17 @@ fn compare_dir_recursive(
         }
     }
 
+    if is_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+
     // Compare same-level files in parallel using rayon so BLAKE3 streaming hashes scale across cores
     let file_entries: Vec<FolderEntryDto> = file_keys
         .par_iter()
         .map(|key| {
+            if is_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
             let l_meta = left_map.get(key);
             let r_meta = right_map.get(key);
 
@@ -383,7 +485,7 @@ fn compare_dir_recursive(
                 (None, None) => FolderItemStatus::Equal,
             };
 
-            FolderEntryDto {
+            Ok(FolderEntryDto {
                 relative_path: normalized_rel,
                 name: display_name,
                 is_dir: false,
@@ -393,11 +495,15 @@ fn compare_dir_recursive(
                 right_size: r_meta.map(|m| m.size),
                 left_modified_ms: l_meta.map(|m| m.modified_ms),
                 right_modified_ms: r_meta.map(|m| m.modified_ms),
-            }
+            })
         })
-        .collect();
+        .collect::<std::io::Result<Vec<_>>>()?;
 
     for entry in file_entries {
+        if out.len() >= MAX_FOLDER_ENTRIES {
+            *truncated = true;
+            break;
+        }
         match entry.status {
             FolderItemStatus::Equal => stats.equal_items += 1,
             FolderItemStatus::Modified => stats.modified_items += 1,
@@ -408,6 +514,8 @@ fn compare_dir_recursive(
         stats.total_items += 1;
         out.push(entry);
     }
+
+    tracker.maybe_emit(out.len());
 
     Ok(())
 }

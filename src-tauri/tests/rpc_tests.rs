@@ -711,3 +711,43 @@ fn test_office_readonly_rpcs_and_write_protection() {
         freecompare_core::exit_codes::IMPORTANT_DIFF
     );
 }
+
+#[test]
+fn test_folder_scan_progress_and_cancel_rpc() {
+    let left = tempdir().unwrap();
+    let right = tempdir().unwrap();
+    fs::create_dir_all(left.path().join("sub")).unwrap();
+    fs::create_dir_all(right.path().join("sub")).unwrap();
+    fs::write(left.path().join("sub/a.txt"), "alpha").unwrap();
+    fs::write(right.path().join("sub/a.txt"), "alpha").unwrap();
+
+    let backend = AppBackend::new();
+    let rx = backend.subscribe_scan_progress();
+
+    let res = backend
+        .dispatch_rpc(
+            "scan_folder_diff",
+            &json!({
+                "left_dir": left.path().to_string_lossy(),
+                "right_dir": right.path().to_string_lossy(),
+                "scan_id": "scan-test-1",
+                "options": {
+                    "mode": "fast_metadata",
+                    "ignore_case_names": false,
+                    "exclude_globs": [],
+                    "recursive": true
+                }
+            }),
+        )
+        .unwrap();
+    assert_eq!(res["truncated"], false);
+
+    let ev = rx.try_recv().expect("expected folder_scan_progress event");
+    assert_eq!(ev.scan_id, "scan-test-1");
+    assert!(ev.dirs_scanned >= 1);
+
+    let cancel_idle = backend
+        .dispatch_rpc("cancel_folder_scan", &json!({ "scan_id": "scan-test-1" }))
+        .unwrap();
+    assert_eq!(cancel_idle["cancelled"], false);
+}
