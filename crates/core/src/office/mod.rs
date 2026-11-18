@@ -96,8 +96,12 @@ pub fn is_ole2_magic(bytes: &[u8]) -> bool {
 /// Extracts lowercase file extension from a local path or `sftp://` URI.
 pub fn extract_extension(path: &str) -> Option<String> {
     let trimmed = path.trim();
-    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-    Path::new(without_query)
+    let candidate = if crate::sftp::is_sftp_uri(trimmed) {
+        trimmed.split(['?', '#']).next().unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    Path::new(candidate)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())

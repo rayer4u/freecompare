@@ -243,3 +243,17 @@ fn test_legacy_doc_and_three_way_rejection() {
         .unwrap();
     assert!(three_err.to_string().contains("三向合并"));
 }
+
+#[test]
+fn test_extract_extension_preserves_windows_unc_prefix() {
+    let win_unc = r"\\?\C:\Users\runner\AppData\Local\Temp\left.docx";
+    assert_eq!(office::extract_extension(win_unc).as_deref(), Some("docx"));
+    assert!(office::is_office_path(win_unc));
+
+    let sftp_query = "sftp://host/path/sheet.xlsx?readonly=1#top";
+    assert_eq!(
+        office::extract_extension(sftp_query).as_deref(),
+        Some("xlsx")
+    );
+    assert!(office::is_office_path(sftp_query));
+}
