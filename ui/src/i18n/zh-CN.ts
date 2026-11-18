@@ -286,6 +286,10 @@ export const zhCN = {
     sftp_badge: "🌐 SFTP",
     sftp_fast_hint: "🌐 检测到 SFTP 远端目录，建议开启「元数据快扫」或「仅当前层」以大幅提升远端浏览速度",
     sftp_switch_fast: "⚡ 切换为元数据快扫",
+    status_total_items: "{count} 项",
+    truncated_hint: "(已截断至 30,000 项)",
+    scanning_progress: "正在扫描 · 已发现 {items} 项 / {dirs} 目录",
+    cancel_scan: "取消",
   },
   file_browser: {
     up: "⬆ 上级",

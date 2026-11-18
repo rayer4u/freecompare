@@ -1,13 +1,19 @@
 import { Component, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import {
   callRustRpc,
+  cancelFolderScan,
   createBlankFolderDiff,
   recomputeFolderStats,
+  subscribeFolderScanProgress,
   UserPreferencesDto,
 } from "../bridge";
 import { FileBrowserModal } from "../components/FileBrowserModal";
 import { t } from "../i18n";
 import { mergeFolderExcludeGlobs } from "../utils/preferences";
+import {
+  createFolderScanController,
+  type FolderScanProgress,
+} from "../utils/folder_scan_state";
 import {
   mergeSubtreeEntries,
   mergeTopLevelPreservingSubtrees,
@@ -86,83 +92,118 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   const [browserSide, setBrowserSide] = createSignal<"left" | "right" | null>(null);
   const [recentFolders, setRecentFolders] = createSignal<string[]>([]);
   const [toast, setToast] = createSignal<string | null>(null);
+  const [isScanning, setIsScanning] = createSignal(false);
+  const [scanProgress, setScanProgress] = createSignal<FolderScanProgress>({
+    dirsScanned: 0,
+    itemsFound: 0,
+  });
   let lastReportedTitle = "";
   let lastScannedLeft = "";
   let lastScannedRight = "";
   let sftpHintShown = false;
+
+  const scanController = createFolderScanController({
+    onScanningChange: setIsScanning,
+    onProgressChange: setScanProgress,
+    cancelRpc: (scanId) => cancelFolderScan(scanId),
+    idPrefix: "folder-scan",
+  });
 
   const notify = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2500);
   };
 
-  const scanRealFolders = async (lDir: string, rDir: string, recursive = isRecursiveScan()) => {
+  const scanRealFolders = async (
+    lDir: string,
+    rDir: string,
+    recursive = isRecursiveScan()
+  ): Promise<boolean> => {
     const l = lDir.trim();
     const r = rDir.trim();
     if (!l || !r) {
       notify(t("folder_diff.path_left_placeholder"));
-      return;
+      return false;
     }
-    try {
-      const res = await callRustRpc<FolderDiffResult>("scan_folder_diff", {
+
+    const outcome = await scanController.runScan((scanId) =>
+      callRustRpc<FolderDiffResult>("scan_folder_diff", {
         left_dir: l,
         right_dir: r,
+        scan_id: scanId,
         options: {
           mode: compareMode() === "hash" ? "content_hash" : "fast_metadata",
           ignore_case_names: false,
           exclude_globs: effectiveExcludeGlobs(),
           recursive,
         },
-      });
-      if (res) {
-        lastScannedLeft = l;
-        lastScannedRight = r;
-        setFolderData(res);
-        setScannedDirs(new Set<string>());
-        setLeftInput(res.left_root);
-        setRightInput(res.right_root);
-        if ((isSftpUri(res.left_root) || isSftpUri(res.right_root)) && compareMode() === "hash" && !sftpHintShown) {
-          sftpHintShown = true;
-          notify(t("folder_diff.sftp_fast_hint"));
-        }
-        // By default: collapse all subfolders so only the current level is shown initially!
-        if (!props.expandAll && !recursive) {
-          const dirs = res.entries.filter((e) => e.is_dir).map((e) => e.relative_path);
-          setCollapsedDirs(new Set(dirs));
-        } else {
-          setCollapsedDirs(new Set<string>());
-        }
-        // Prefer selecting the first modified/diff file automatically (like Beyond Compare)
-        const firstDiffFile =
-          res.entries.find((e) => !e.is_dir && e.status !== "equal") ??
-          res.entries.find((e) => !e.is_dir) ??
-          res.entries[0];
-        if (firstDiffFile) {
-          selectRow(firstDiffFile);
-        } else {
-          setSelectedRelPath(null);
-          setSelectedItems([]);
-        }
-        const lBase = displayPathBaseName(res.left_root);
-        const rBase = displayPathBaseName(res.right_root);
-        const remotePrefix = isSftpUri(res.left_root) || isSftpUri(res.right_root) ? "🌐 " : "";
-        const baseTitle =
-          lBase === rBase
-            ? lBase
-            : lBase && rBase
-            ? `${lBase} ↔ ${rBase}`
-            : lBase || rBase;
-        const folderTitle = baseTitle ? `${remotePrefix}${baseTitle}` : "";
-        if (folderTitle && folderTitle !== lastReportedTitle) {
-          lastReportedTitle = folderTitle;
-          props.onUpdateTabTitle?.(`📁 ${folderTitle}`);
-        }
-      } else {
-        notify(t("folder_diff.err_scan"));
-      }
-    } catch (err) {
-      notify(err instanceof Error && err.message ? err.message : t("folder_diff.err_scan"));
+      })
+    );
+
+    if (outcome.status === "stale" || outcome.status === "cancelled") {
+      return false;
     }
+    if (outcome.status === "empty") {
+      notify(t("folder_diff.err_scan"));
+      return false;
+    }
+    if (outcome.status === "error") {
+      const err = outcome.error;
+      notify(
+        err instanceof Error && err.message ? err.message : t("folder_diff.err_scan")
+      );
+      return false;
+    }
+
+    const res = outcome.result;
+    lastScannedLeft = l;
+    lastScannedRight = r;
+    setFolderData(res);
+    setScannedDirs(new Set<string>());
+    setLeftInput(res.left_root);
+    setRightInput(res.right_root);
+    if (
+      (isSftpUri(res.left_root) || isSftpUri(res.right_root)) &&
+      compareMode() === "hash" &&
+      !sftpHintShown
+    ) {
+      sftpHintShown = true;
+      notify(t("folder_diff.sftp_fast_hint"));
+    }
+    // By default: collapse all subfolders so only the current level is shown initially!
+    if (!recursive) {
+      const dirs = res.entries.filter((e) => e.is_dir).map((e) => e.relative_path);
+      setCollapsedDirs(new Set(dirs));
+    } else {
+      setCollapsedDirs(new Set<string>());
+    }
+    // Prefer selecting the first modified/diff file automatically (like Beyond Compare)
+    const firstDiffFile =
+      res.entries.find((e) => !e.is_dir && e.status !== "equal") ??
+      res.entries.find((e) => !e.is_dir) ??
+      res.entries[0];
+    if (firstDiffFile) {
+      selectRow(firstDiffFile);
+    } else {
+      setSelectedRelPath(null);
+      setSelectedItems([]);
+    }
+    const lBase = displayPathBaseName(res.left_root);
+    const rBase = displayPathBaseName(res.right_root);
+    const remotePrefix =
+      isSftpUri(res.left_root) || isSftpUri(res.right_root) ? "🌐 " : "";
+    const baseTitle =
+      lBase === rBase
+        ? lBase
+        : lBase && rBase
+        ? `${lBase} ↔ ${rBase}`
+        : lBase || rBase;
+    const folderTitle = baseTitle ? `${remotePrefix}${baseTitle}` : "";
+    if (folderTitle && folderTitle !== lastReportedTitle) {
+      lastReportedTitle = folderTitle;
+      props.onUpdateTabTitle?.(`📁 ${folderTitle}`);
+    }
+    return true;
   };
 
   const fetchSubfolder = (subRel: string, recursive = false) =>
@@ -183,9 +224,6 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     recursive = false,
     silent = false
   ) => {
-    if (!silent) {
-      notify(t("folder_diff.scanning_subdir", { path: subRel }));
-    }
     setScannedDirs((prev) => new Set(prev).add(subRel));
     try {
       const res = await fetchSubfolder(subRel, recursive);
@@ -623,9 +661,14 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
     untrack(() => applyFolderPreferences(prefs, folderMountedOnce));
   });
 
+  let unsubScanProgress: (() => void) | null = null;
+
   onMount(async () => {
     document.addEventListener("keydown", handleFolderKeyDown);
     window.addEventListener("click", dismissMenu);
+    unsubScanProgress = subscribeFolderScanProgress((ev) => {
+      scanController.handleProgress(ev);
+    });
     const prefs = props.userPrefs ?? (await callRustRpc<UserPreferencesDto>("get_user_preferences"));
     if (prefs) {
       applyFolderPreferences(prefs, false);
@@ -639,6 +682,9 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   onCleanup(() => {
     document.removeEventListener("keydown", handleFolderKeyDown);
     window.removeEventListener("click", dismissMenu);
+    unsubScanProgress?.();
+    unsubScanProgress = null;
+    scanController.cancelActiveScan();
   });
 
   const toggleDir = async (relPath: string) => {
@@ -663,11 +709,13 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
   };
 
   const expandAll = async () => {
-    notify(t("folder_diff.expanding_all"));
     // If not in recursive full scan mode yet, trigger recursive scan to fetch all nested items
     if (!isRecursiveScan()) {
       setIsRecursiveScan(true);
-      await scanRealFolders(leftInput(), rightInput(), true);
+      const ok = await scanRealFolders(leftInput(), rightInput(), true);
+      if (!ok) {
+        return;
+      }
     }
     setCollapsedDirs(new Set<string>());
     notify(t("folder_diff.expanded_all"));
@@ -1394,7 +1442,10 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
       <footer class="app-statusbar">
         <div class="statusbar-left">
           <span class="statusbar-item">
-            {folderData().entries.length} 项
+            {t("folder_diff.status_total_items", { count: folderData().entries.length })}
+            <Show when={folderData().truncated}>
+              <span class="statusbar-truncated">{t("folder_diff.truncated_hint")}</span>
+            </Show>
           </span>
         </div>
         <div class="statusbar-center">
@@ -1403,7 +1454,26 @@ export const FolderDiffView: Component<FolderDiffViewProps> = (props) => {
           <span class="stat-pill del">{t("folder_diff.stat_right", { count: folderData().stats.right_only_items })}</span>
           <span class="stat-pill eq">{t("folder_diff.stat_same", { count: folderData().stats.equal_items })}</span>
         </div>
-        <div class="statusbar-right"></div>
+        <div class="statusbar-right">
+          <Show when={isScanning()}>
+            <span class="statusbar-item statusbar-scan-progress">
+              <span class="diff-spinner" aria-hidden="true"></span>
+              <span>
+                {t("folder_diff.scanning_progress", {
+                  items: scanProgress().itemsFound,
+                  dirs: scanProgress().dirsScanned,
+                })}
+              </span>
+            </span>
+            <button
+              type="button"
+              class="statusbar-cancel-btn"
+              onClick={() => scanController.cancelActiveScan()}
+            >
+              {t("folder_diff.cancel_scan")}
+            </button>
+          </Show>
+        </div>
       </footer>
 
       <Show when={browserSide()}>

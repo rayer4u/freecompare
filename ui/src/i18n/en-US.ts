@@ -288,6 +288,10 @@ export const enUS: I18nSchema = {
     sftp_badge: "🌐 SFTP",
     sftp_fast_hint: "🌐 SFTP remote folder detected — Fast Metadata / Top-Level scan is recommended for speed",
     sftp_switch_fast: "⚡ Switch to Fast Metadata",
+    status_total_items: "{count} items",
+    truncated_hint: "(truncated at 30,000 items)",
+    scanning_progress: "Scanning · {items} items / {dirs} dirs",
+    cancel_scan: "Cancel",
   },
   file_browser: {
     up: "⬆ Up",

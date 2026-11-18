@@ -157,6 +157,7 @@ export interface FolderDiffResult {
   right_root: string;
   entries: FolderEntryDto[];
   stats: FolderDiffStats;
+  truncated?: boolean;
 }
 
 export type SessionTabKind = "home" | "two_way" | "folder" | "three_way";

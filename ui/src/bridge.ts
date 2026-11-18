@@ -152,6 +152,114 @@ function notifyUserPreferencesListeners(prefs: unknown) {
   }
 }
 
+export interface FolderScanProgressEvent {
+  scan_id: string;
+  dirs_scanned: number;
+  items_found: number;
+}
+
+type FolderScanProgressListener = (ev: FolderScanProgressEvent) => void;
+const folderScanProgressListeners = new Set<FolderScanProgressListener>();
+let folderScanEventSource: EventSource | null = null;
+let folderScanTauriUnlisten: (() => void) | null = null;
+let folderScanTauriListening = false;
+
+function dispatchFolderScanProgress(payload: unknown) {
+  if (!payload || typeof payload !== "object") return;
+  const ev = payload as Partial<FolderScanProgressEvent>;
+  if (typeof ev.scan_id !== "string") return;
+  const normalized: FolderScanProgressEvent = {
+    scan_id: ev.scan_id,
+    dirs_scanned: typeof ev.dirs_scanned === "number" ? ev.dirs_scanned : 0,
+    items_found: typeof ev.items_found === "number" ? ev.items_found : 0,
+  };
+  for (const listener of folderScanProgressListeners) {
+    listener(normalized);
+  }
+}
+
+function ensureFolderScanTransport() {
+  if (isTauriRuntime()) {
+    if (folderScanTauriListening || folderScanTauriUnlisten) return;
+    folderScanTauriListening = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<FolderScanProgressEvent>("folder_scan_progress", (event) => {
+          dispatchFolderScanProgress(event.payload);
+        })
+      )
+      .then((unlisten) => {
+        folderScanTauriListening = false;
+        if (folderScanProgressListeners.size === 0) {
+          unlisten();
+        } else {
+          folderScanTauriUnlisten = unlisten;
+        }
+      })
+      .catch(() => {
+        folderScanTauriListening = false;
+      });
+    return;
+  }
+
+  if (!folderScanEventSource && typeof EventSource !== "undefined") {
+    try {
+      const es = new EventSource("/api/events");
+      es.addEventListener("folder_scan_progress", (event) => {
+        try {
+          const parsed = JSON.parse((event as MessageEvent).data);
+          dispatchFolderScanProgress(parsed);
+        } catch {
+          // Ignore malformed SSE payload
+        }
+      });
+      es.onerror = () => {
+        // EventSource will automatically attempt to reconnect if connection drops
+      };
+      folderScanEventSource = es;
+    } catch {
+      // Ignore if EventSource is unavailable
+    }
+  }
+}
+
+function teardownFolderScanTransportIfUnused() {
+  if (folderScanProgressListeners.size > 0) return;
+  if (folderScanEventSource) {
+    folderScanEventSource.close();
+    folderScanEventSource = null;
+  }
+  if (folderScanTauriUnlisten) {
+    folderScanTauriUnlisten();
+    folderScanTauriUnlisten = null;
+  }
+}
+
+/**
+ * Subscribes to backend `folder_scan_progress` events over SSE (HTTP) or Tauri event bus.
+ */
+export function subscribeFolderScanProgress(
+  cb: FolderScanProgressListener
+): () => void {
+  folderScanProgressListeners.add(cb);
+  ensureFolderScanTransport();
+  return () => {
+    folderScanProgressListeners.delete(cb);
+    teardownFolderScanTransportIfUnused();
+  };
+}
+
+/**
+ * Requests cooperative cancellation of an in-flight folder scan (or all active scans if omitted).
+ */
+export async function cancelFolderScan(
+  scanId?: string
+): Promise<{ cancelled: boolean } | null> {
+  return callRustRpc<{ cancelled: boolean }>("cancel_folder_scan", {
+    scan_id: scanId ?? null,
+  });
+}
+
 /**
  * Calls the Rust `AppBackend` via Tauri v2 IPC (`rpc_invoke`) or via the local
  * HTTP RPC server started by `fc` / `bcompare <left> <right>`.
